@@ -5,6 +5,9 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.agentcraft.AgentCraft;
+import dev.agentcraft.mp.StudioId;
+import net.minecraft.core.BlockPos;
+import java.util.function.BiConsumer;
 import dev.agentcraft.world.HqWorld;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -44,6 +47,8 @@ public final class Anchors {
 
 	/** An immutable published layout. {@code revision} increases with every publish (also across loads). */
 	public record Layout(String name, long revision, @Nullable Bounds bounds, Map<String, Anchor> anchors) {
+		public Layout { anchors = Collections.unmodifiableMap(new LinkedHashMap<>(anchors)); }
+
 		public static final Layout EMPTY = new Layout("none", 0, null, Map.of());
 
 		public @Nullable Anchor get(String anchorName) {
@@ -55,7 +60,9 @@ public final class Anchors {
 		}
 	}
 
-	private static volatile Layout current = Layout.EMPTY;
+	private static volatile Map<StudioId, Layout> layouts = Map.of(StudioId.LOCAL, Layout.EMPTY);
+	private static volatile StudioId self = StudioId.LOCAL;
+	private static final List<BiConsumer<StudioId, Layout>> STUDIO_LISTENERS = new CopyOnWriteArrayList<>();
 	private static final List<Consumer<Layout>> LISTENERS = new CopyOnWriteArrayList<>();
 
 	private Anchors() {
@@ -67,15 +74,18 @@ public final class Anchors {
 				load(server);
 			}
 		});
-		ServerLifecycleEvents.SERVER_STOPPED.register(server -> set(Layout.EMPTY));
+		ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
+			for (StudioId id : all().keySet()) remove(id);
+			setSelf(StudioId.LOCAL);
+		});
 	}
 
 	public static Layout current() {
-		return current;
+		return forStudio(self());
 	}
 
 	public static @Nullable Anchor get(String name) {
-		return current.anchors().get(name);
+		return current().anchors().get(name);
 	}
 
 	public static void addListener(Consumer<Layout> listener) {
@@ -88,20 +98,60 @@ public final class Anchors {
 
 	/** Make {@code layout} current and save it with the world. Call on the server thread. */
 	public static void publish(MinecraftServer server, Layout layout) {
-		Layout withRev = new Layout(layout.name(), current.revision() + 1, layout.bounds(), layout.anchors());
-		set(withRev);
-		save(server, withRev);
+		Layout withRev = new Layout(layout.name(), current().revision() + 1, layout.bounds(), layout.anchors());
+		publish(self(), withRev);
+		if (self().equals(StudioId.LOCAL)) save(server, withRev);
 		AgentCraft.LOGGER.info("Published layout '{}' rev {} with {} anchors", withRev.name(), withRev.revision(), withRev.anchors().size());
 	}
 
-	private static void set(Layout layout) {
-		current = layout;
-		for (Consumer<Layout> l : LISTENERS) {
-			try {
-				l.accept(layout);
-			} catch (Throwable t) {
-				AgentCraft.LOGGER.warn("Anchor listener failed", t);
-			}
+	public static StudioId self() { return self; }
+
+	public static void setSelf(StudioId id) {
+		self = java.util.Objects.requireNonNull(id);
+		notifyLocal(current());
+	}
+
+	public static Layout forStudio(StudioId id) { return layouts.getOrDefault(id, Layout.EMPTY); }
+
+	public static Map<StudioId, Layout> all() { return layouts; }
+
+	public static void addStudioListener(BiConsumer<StudioId, Layout> listener) { STUDIO_LISTENERS.add(listener); }
+
+	/** Install an immutable snapshot. Disk persistence outside LOCAL belongs to the plot registry. */
+	public static void publish(StudioId id, Layout layout) {
+		synchronized (Anchors.class) {
+			Map<StudioId, Layout> next = new LinkedHashMap<>(layouts);
+			next.put(id, layout);
+			layouts = Collections.unmodifiableMap(next);
+		}
+		notifyStudio(id, layout);
+	}
+
+	public static void publish(Layout layout) { publish(self(), layout); }
+
+	public static void remove(StudioId id) {
+		synchronized (Anchors.class) {
+			Map<StudioId, Layout> next = new LinkedHashMap<>(layouts);
+			next.remove(id);
+			layouts = Collections.unmodifiableMap(next);
+		}
+		notifyStudio(id, Layout.EMPTY);
+	}
+
+	private static void set(Layout layout) { publish(StudioId.LOCAL, layout); }
+
+	private static void notifyStudio(StudioId id, Layout layout) {
+		if (id.equals(self())) notifyLocal(layout);
+		for (var listener : STUDIO_LISTENERS) {
+			try { listener.accept(id, layout); }
+			catch (Throwable t) { AgentCraft.LOGGER.warn("Studio anchor listener failed", t); }
+		}
+	}
+
+	private static void notifyLocal(Layout layout) {
+		for (Consumer<Layout> listener : LISTENERS) {
+			try { listener.accept(layout); }
+			catch (Throwable t) { AgentCraft.LOGGER.warn("Anchor listener failed", t); }
 		}
 	}
 
@@ -199,6 +249,7 @@ public final class Anchors {
 	/** Collects anchors while an HQ builder runs. Later puts with the same name replace earlier ones. */
 	public static final class Builder {
 		private final String name;
+		private BlockPos origin = BlockPos.ZERO;
 		private final Map<String, Anchor> anchors = new LinkedHashMap<>();
 		private @Nullable Bounds bounds;
 
@@ -206,8 +257,13 @@ public final class Anchors {
 			this.name = name;
 		}
 
+		public Builder origin(BlockPos origin) {
+			this.origin = origin.immutable();
+			return this;
+		}
+
 		public Builder put(String anchorName, double x, double y, double z, float yaw, float pitch) {
-			anchors.put(anchorName, new Anchor(anchorName, x, y, z, yaw, pitch));
+			anchors.put(anchorName, new Anchor(anchorName, x + origin.getX(), y + origin.getY(), z + origin.getZ(), yaw, pitch));
 			return this;
 		}
 
@@ -233,8 +289,8 @@ public final class Anchors {
 		}
 
 		public Builder bounds(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
-			this.bounds = new Bounds(Math.min(minX, maxX), Math.min(minY, maxY), Math.min(minZ, maxZ),
-				Math.max(minX, maxX), Math.max(minY, maxY), Math.max(minZ, maxZ));
+			this.bounds = new Bounds(Math.min(minX, maxX) + origin.getX(), Math.min(minY, maxY) + origin.getY(), Math.min(minZ, maxZ) + origin.getZ(),
+				Math.max(minX, maxX) + origin.getX(), Math.max(minY, maxY) + origin.getY(), Math.max(minZ, maxZ) + origin.getZ());
 			return this;
 		}
 
