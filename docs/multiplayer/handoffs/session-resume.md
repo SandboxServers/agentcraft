@@ -11,7 +11,8 @@ MP-00 (the spike and this plan) is on `main`. Nothing is built for multiplayer y
 - The stack is in `/opt/agentcraft` (compose plus `.env`, root, mode 600). The world is in the `agentcraft-data` volume.
 - It is published on TCP 25565 with a whitelist.
 - Its Watchtower is isolated from Cimmeria's, which was verified by restarting Cimmeria's Watchtower (audit A-48).
-- The first release `v2026-10-03.1` passed every gate on GitHub. The package is public, so the colo pulls it without a login.
+- Releases `v2026-10-03.1` and `.2` passed every gate on GitHub. The package is public, so the colo pulls it without a login.
+- **Automatic updates are proven end to end** (A-55): `/release` or a dispatch → about 10 minutes of CI → the colo backs up, swaps and keeps the world within about 5 minutes.
 
 ## Before dispatching anything
 
