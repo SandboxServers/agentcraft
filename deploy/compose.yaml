@@ -55,7 +55,14 @@ services:
       WATCHTOWER_INCLUDE_RESTARTING: "true"
       # Never WATCHTOWER_REMOVE_VOLUMES here: the world lives in a volume.
     labels:
-      com.centurylinklabs.watchtower.scope: "agentcraft"
+      # The watchtower image labels itself `com.centurylinklabs.watchtower=true`. An *unscoped*
+      # Watchtower on the same host (Cimmeria's) applies no scope filter to its startup duplicate
+      # check and stops every container with that label except the newest - i.e. on its next
+      # restart it would stop itself, because this one is newer (watchtower v1.7.1
+      # internal/actions/check.go; the label must equal "true", pkg/container/metadata.go).
+      # Overriding it to "false" hides this instance from that check. This container also
+      # deliberately has no scope label, so it never tries to update itself.
+      com.centurylinklabs.watchtower: "false"
 
 volumes:
   agentcraft-data:
