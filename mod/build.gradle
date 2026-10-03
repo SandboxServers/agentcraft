@@ -104,3 +104,16 @@ tasks.register("mcSources", Sync) {
 	into(layout.buildDirectory.dir("mcsrc"))
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
+
+// MP-F: JUnit 5 tests for common contracts and client registry seams.
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.13.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+sourceSets.test.compileClasspath += sourceSets.client.output + sourceSets.client.compileClasspath
+sourceSets.test.runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
+test {
+    useJUnitPlatform()
+    workingDir rootProject.projectDir
+}
