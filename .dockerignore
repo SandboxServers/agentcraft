@@ -1,0 +1,8 @@
+# The server image needs only mod/ and deploy/. Keep the build context small.
+**
+!mod/
+!deploy/
+mod/build/
+mod/.gradle/
+mod/run/
+deploy/.env

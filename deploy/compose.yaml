@@ -1,0 +1,61 @@
+# AgentCraft dedicated server for a self-updating host (the colo).
+#
+#   cp .env.example .env    # then edit .env on the host (never commit it)
+#   docker compose up -d
+#
+# Updates: Watchtower polls the rolling `latest-prerelease` tag every 5 minutes. Before it swaps
+# the container it runs the backup hook (world → /data/backups), then stops the server gracefully
+# (the world saves) and starts the new image on the same volume. The world persists across updates.
+#
+# Sharing a host with another Watchtower (for example Cimmeria's, which manages containers
+# labelled `com.centurylinklabs.watchtower.enable=true`): this file uses its own Watchtower
+# *scope*, and the server container deliberately carries no `enable` label, so neither Watchtower
+# touches the other's containers, and the two instances do not stop each other.
+#
+# See docs/multiplayer/deploy.md. Nothing host-specific belongs in this file.
+
+name: agentcraft
+
+services:
+  agentcraft:
+    image: ${AGENTCRAFT_IMAGE:-ghcr.io/sandboxservers/agentcraft-server:latest-prerelease}
+    container_name: agentcraft
+    restart: unless-stopped
+    environment:
+      EULA: ${EULA:?set EULA=TRUE in .env to accept the Minecraft EULA}
+      MEMORY: ${MEMORY:-3G}
+      RCON_PASSWORD: ${RCON_PASSWORD:-}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${AGENTCRAFT_PORT:-25565}:25565/tcp"
+    volumes:
+      - agentcraft-data:/data
+    # Saving a large world can take a while; Docker's default 10 s would kill it mid-save.
+    stop_grace_period: 120s
+    stdin_open: true   # `docker attach agentcraft` gives the server console (detach: Ctrl-P Ctrl-Q)
+    tty: true
+    labels:
+      com.centurylinklabs.watchtower.scope: "agentcraft"
+      com.centurylinklabs.watchtower.lifecycle.pre-update: "/opt/agentcraft/bin/backup.sh"
+      com.centurylinklabs.watchtower.lifecycle.pre-update-timeout: "10"   # minutes
+
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: agentcraft-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_SCOPE: "agentcraft"
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_LIFECYCLE_HOOKS: "true"
+      WATCHTOWER_TIMEOUT: "120s"        # matches stop_grace_period: let the world save
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Never WATCHTOWER_REMOVE_VOLUMES here: the world lives in a volume.
+    labels:
+      com.centurylinklabs.watchtower.scope: "agentcraft"
+
+volumes:
+  agentcraft-data:

@@ -1,0 +1,10 @@
+# Trivy exceptions for the AgentCraft server image. Every entry needs a reason and an expiry
+# (Trivy re-flags it after the date, forcing a re-check). Used by .github/workflows/release-container.yml.
+
+# CVE-2026-75595, io.netty:netty-handler 4.2.16.Final (bundled inside Mojang's 26.3 server jar).
+# SNI routing bypass via a fragmented TLS ClientHello, in Netty's SniHandler. Not reachable here:
+# the game protocol is plain TCP with no TLS. The only TLS user in the 26.3 server is the optional
+# management JSON-RPC server (net/minecraft/server/jsonrpc/ManagementServer.java:110, a plain
+# SslHandler, not SniHandler), which is off by default and pinned off in deploy/server/server.properties.
+# We cannot replace Mojang's bundled Netty. Remove this entry when Minecraft ships Netty >= 4.2.17.
+CVE-2026-75595 exp:2027-01-31
