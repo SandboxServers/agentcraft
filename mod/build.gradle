@@ -41,6 +41,16 @@ loom {
 	}
 }
 
+fabricApi {
+	configureTests {
+		createSourceSet = true
+		modId = "agentcraft-gametest"
+		enableGameTests = true
+		enableClientGameTests = false
+		eula = true
+	}
+}
+
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
@@ -92,10 +102,19 @@ tasks.matching { it.name == "runClient" }.configureEach {
 // Unpack the decompiled Minecraft sources into build/mcsrc so agents can grep real 26.3 APIs
 // (`gradlew mcSources`, then search mod/build/mcsrc/net/minecraft/...). Minecraft 26.x is
 // unobfuscated, so these are Mojang's real names.
+def minecraftArtifactConsumers = tasks.matching {
+	it.name == "build" || it.name == "test" || it.name == "runGameTest" || it.name.startsWith("compile")
+}
+tasks.matching { it.name.startsWith("gen") && it.name.endsWith("SourcesWithVineflower") }.configureEach {
+	// Loom writes generated source jars beside artifacts consumed by compilation and game runs. Keep
+	// the decompiler behind those consumers when build and mcSources share one task graph (audit A-03).
+	mustRunAfter(minecraftArtifactConsumers)
+}
 tasks.register("mcSources", Sync) {
 	group = "agentcraft"
 	description = "Decompile (genSources) and unpack Minecraft sources into build/mcsrc"
 	dependsOn("genSources")
+	mustRunAfter(minecraftArtifactConsumers)
 	notCompatibleWithConfigurationCache("reads Loom's cache directory at execution time")
 	def loomCache = file(".gradle/loom-cache/minecraftMaven")
 	from {
