@@ -137,7 +137,7 @@ jobs:
             docker run -d --name smoke -v smoke-data:/data \
               -e EULA=TRUE -e MEMORY=2G -e RCON_PASSWORD=smoke-only "$IMAGE" >/dev/null
             for i in $(seq 1 90); do
-              if docker logs smoke 2>&1 | grep -q 'Done (' \
+              if logs_have 'Done (' \
                  && docker exec smoke bash -c 'exec 3<>/dev/tcp/127.0.0.1/25565' 2>/dev/null \
                  && docker exec smoke $RCON list >/dev/null 2>&1; then
                 echo "ready after $((i * 2)) s"; return 0
@@ -150,15 +150,19 @@ jobs:
             echo "::error::server not ready within 180 s"; return 1
           }
           dump() { echo "::group::container logs ($1)"; docker logs smoke 2>&1 || true; echo "::endgroup::"; }
+          # Never pipe into `grep -q` under pipefail: grep exits at the first match, the writer gets
+          # SIGPIPE and the pipeline "fails" although the text is there (a flaky false negative).
+          logs_have() { docker logs smoke > /tmp/smoke.log 2>&1; grep -q -- "$1" /tmp/smoke.log; }
+          rcon_says() { docker exec smoke $RCON "$1" > /tmp/rcon.out 2>&1; grep -q -- "$2" /tmp/rcon.out; }
 
           ok=1
           up || ok=0
           if [ "$ok" = 1 ]; then
-            docker logs smoke 2>&1 | grep -q 'AgentCraft common init done' || { echo "::error::mod did not initialise"; ok=0; }
-            docker logs smoke 2>&1 | grep -q "Published layout 'studio'" || { echo "::error::studio was not built"; ok=0; }
+            logs_have 'AgentCraft common init done' || { echo "::error::mod did not initialise"; ok=0; }
+            logs_have "Published layout 'studio'" || { echo "::error::studio was not built"; ok=0; }
             docker exec smoke $RCON "forceload add 0 0" >/dev/null
             sleep 2
-            docker exec smoke $RCON "setblock 5 70 5 minecraft:gold_block" | grep -q 'Changed the block' || ok=0
+            rcon_says "setblock 5 70 5 minecraft:gold_block" 'Changed the block' || { echo "::error::setblock failed"; ok=0; }
             docker exec smoke /opt/agentcraft/bin/backup.sh || { echo "::error::backup hook failed"; ok=0; }
           fi
           dump "first start"
@@ -166,9 +170,9 @@ jobs:
           docker rm smoke >/dev/null
           if [ "$ok" = 1 ]; then
             up || ok=0
-            docker exec smoke $RCON "execute if block 5 70 5 minecraft:gold_block" | grep -q 'Test passed' \
+            rcon_says "execute if block 5 70 5 minecraft:gold_block" 'Test passed' \
               || { echo "::error::world change did not survive a graceful stop"; ok=0; }
-            docker logs smoke 2>&1 | grep -q 'Loaded layout' || { echo "::error::layout not reloaded"; ok=0; }
+            logs_have 'Loaded layout' || { echo "::error::layout not reloaded"; ok=0; }
             dump "after restart"
           fi
           docker rm -f smoke >/dev/null 2>&1 || true
