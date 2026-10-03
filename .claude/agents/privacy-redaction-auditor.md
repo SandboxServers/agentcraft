@@ -36,6 +36,7 @@ You protect two things: **a player's private work** (their code, plans, prompts,
   - webhook URLs.
 - Deployment config uses placeholders (`deploy/.env.example`), and `.env` is gitignored.
 - Workflows pull nothing from the host and push nothing to it. If someone proposes SSH deploys, the address and key must live only in GitHub secrets, and never be echoed.
+- Inspecting the colo: container environments hold secrets (Cimmeria's Watchtower has a Discord webhook URL). Use `docker inspect --format` on specific fields, and never paste a full `Config.Env` into a file, commit, PR or chat.
 - Log and telemetry lines carry counts and ids only. A player's chosen names are allowed; free text is not.
 
 ## Method

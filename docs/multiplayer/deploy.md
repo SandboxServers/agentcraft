@@ -31,8 +31,14 @@ docker compose up -d
 docker logs -f agentcraft        # wait for "Done (" and "Published layout 'studio'"
 ```
 
-- **GHCR visibility:** the first release creates the `agentcraft-server` package. If it is private, either make it public (Package settings → Change visibility) or run `docker login ghcr.io` on the host with a read-only token, so Watchtower can pull.
-- **Sharing the host with Cimmeria:** this compose project is named `agentcraft` and has its own containers, volume and port. Its Watchtower runs with scope `agentcraft`, and the server container carries only the scope label, never `com.centurylinklabs.watchtower.enable`. So Cimmeria's Watchtower (label-enable mode) never touches it, this one never touches Cimmeria's containers, and the two Watchtower instances do not shut each other down. Check headroom first: the server wants `MEMORY` plus about 1 GB.
+- **GHCR visibility:** the colo pulls Cimmeria's image without any registry login (it has no GHCR credentials), so `agentcraft-server` must be **public** too. The first release creates the package, possibly private. Flip it in the package's settings (Change visibility → Public); the local `gh` token has no `read:packages` scope to check or change it.
+- **Colo layout (mirrors Cimmeria's):** `/opt/agentcraft/compose.yaml` and `/opt/agentcraft/.env`, owned by root, mode 600. Before you edit either, make a dated copy (`compose.yaml.bak-YYYY-MM-DD-<why>`), as `/opt/cimmeria` does. Run compose with `sudo docker compose` from that directory. Generate the RCON password on the host (`openssl rand -hex 24`), so it never transits anywhere else.
+- **Sharing the host with Cimmeria:** Cimmeria's Watchtower (`/opt/cimmeria/compose.yml`) is **unscoped**, with `WATCHTOWER_LABEL_ENABLE=true`, `WATCHTOWER_REMOVE_VOLUMES=true` and Discord notifications. AgentCraft is isolated from it in three ways (Watchtower v1.7.1 source, verified 2026-10-03):
+  1. **Updates:** our server container carries the scope label `agentcraft` and never `com.centurylinklabs.watchtower.enable`, so Cimmeria's label-enable instance never updates it. Our scoped instance only considers containers labelled with scope `agentcraft`, so it never touches Cimmeria's.
+  2. **Duplicate-instance cleanup:** on startup, an *unscoped* Watchtower applies no scope filter and stops every container labelled `com.centurylinklabs.watchtower=true` except the newest (`internal/actions/check.go`). The Watchtower image sets that label on itself, so without countermeasures Cimmeria's instance would, on its next restart, stop **itself** (ours is newer). Our compose overrides that label to `"false"` on our Watchtower (the check needs the exact value `"true"`, `pkg/container/metadata.go`). This was reproduced locally before the fix.
+  3. **Self-updates:** our Watchtower container carries no scope label, so our instance never tries to update itself.
+- **Never run a Watchtower without `--label-enable` or `--scope`** on a shared host, not even `--run-once` to test something. An unfiltered run updates *every* container whose image has a newer tag.
+- **Host capacity:** the server wants `MEMORY` plus about 1 GB. The colo has ample RAM and Docker's data on a large NVMe volume, so the root filesystem is not a constraint.
 
 ## Players and the whitelist
 
@@ -88,7 +94,9 @@ Watchtower leaves a pinned tag alone until you remove the pin. Once multiplayer 
 | Symptom | Cause and fix |
 |---|---|
 | Container exits with code 64 at once | `EULA` is not `TRUE` in `.env`. |
-| Watchtower logs `client version 1.25 is too old` | Docker Engine 29+ dropped old API versions. Add `DOCKER_API_VERSION: "1.44"` to the watchtower service's environment. |
+| Watchtower logs `client version 1.25 is too old` | Docker Engine 29+ (for example a current Docker Desktop) dropped old API versions. Add `DOCKER_API_VERSION: "1.44"` to the watchtower service's environment. The colo runs Docker 28 (API 1.24-1.48), where Watchtower 1.7.1 works unchanged. |
+| Players cannot connect, but the server is healthy | The colo is on a private network, so its edge must forward the chosen TCP port to it, as it does Cimmeria's ports. The host itself has no firewall beyond Docker's own rules. |
+| `docker inspect` prints secrets | Container environments on the colo hold secrets (Cimmeria's Watchtower has a Discord webhook URL). Inspect specific fields (`--format '{{json .Config.Labels}}'`), never the full `Config.Env`, and never paste it anywhere. |
 | Updates never arrive | The GHCR package is private and the host is not logged in, or `AGENTCRAFT_IMAGE` pins a tag. |
 | The studio is missing or half-built after changing the world type | The builder needs a superflat world with grass at y = 64. Restore a backup, or start a fresh volume. |
 | `docker exec ... /opt/...: no such file` from Git Bash | Use `MSYS_NO_PATHCONV=1`. |

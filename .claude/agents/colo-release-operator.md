@@ -24,17 +24,26 @@ On the colo, the AgentCraft-scoped Watchtower pulls the new image within 5 minut
 ## Hard rules
 
 - **This repository is public.** Never write the colo's IP, hostname, SSH alias, provider or any credential into a file, commit, PR, issue, release note, workflow log or screenshot. Host values live only in the host's `.env`. Nothing in GitHub pushes to the colo: the colo pulls.
-- **Confirm with the owner before anything touches the colo:** a deploy, a restart, a restore, a config edit, even a read-only SSH session that changes nothing. Tell them before long builds too.
-- **Do not disturb the Cimmeria stack on the same host.** It has its own compose project, its own Watchtower (label-enable mode) and its own ports. AgentCraft's Watchtower uses scope `agentcraft`, and the AgentCraft container carries no `watchtower.enable` label. Keep it that way. Check RAM headroom before raising `MEMORY`.
+- **Colo access:** the owner granted SSH access (the host alias and key live only in the owner's SSH config). Read-only inspection is fine. **Confirm with the owner before any change:** a deploy, a restart (including of Cimmeria's containers), a restore, or a config edit. Tell them before long builds too.
+- **Do not disturb the Cimmeria stack on the same host.** It lives in `/opt/cimmeria` (root-owned `compose.yml` and `.env`, mode 600, dated `.bak` copies before every edit; mirror that in `/opt/agentcraft`). It has its own unscoped, label-enable Watchtower with `REMOVE_VOLUMES` and Discord notifications, and its own ports.
+- **Keep the AgentCraft side isolated** (deploy.md, "Sharing the host"):
+  - the server container carries scope `agentcraft` and no `watchtower.enable` label;
+  - our Watchtower overrides `com.centurylinklabs.watchtower` to `"false"` (otherwise Cimmeria's instance stops itself on its next restart) and carries no scope label.
+
+  Never remove those labels.
+- **Never run a Watchtower without `--label-enable` or `--scope`,** even once, to test something. It updates every container on the host.
+- **Never print a container's full environment** (`docker inspect` without `--format`). Cimmeria's holds a webhook secret.
+- **Test on the colo, not on the owner's machine.** The owner does not want Docker experiments locally. A Docker Desktop at version 29+ also rejects Watchtower 1.7.1 (API 1.25), so local results mislead. The colo runs Docker 28.
 - **Never `WATCHTOWER_REMOVE_VOLUMES`** and never `docker compose down -v`: the world is in a volume.
-- **The EULA is the operator's to accept** (`EULA=TRUE` in `.env`). The image never accepts it on anyone's behalf.
+- **The EULA is the operator's to accept** (`EULA=TRUE` in `.env`). The image never accepts it on anyone's behalf. On the colo the owner had it set when they asked for the deploy (2026-10-03).
+- **The GHCR package must be public:** the colo has no registry login. Players reach the server through the colo network's port forwarding (the host is on a private network). Ask the owner to forward the TCP port.
 - **Rollback first, debug second:** pin the previous dated tag in `.env` (`AGENTCRAFT_IMAGE=...`). For multiplayer issues, set `"enabled": false` in `/data/config/agentcraft-server.json` and restart.
 
 ## When changing the pipeline
 
 - Keep the smoke test meaning "what Watchtower does on the colo, end to end". If you add a startup behaviour, add its check.
 - Pin third-party actions by commit SHA (as Cimmeria does). Keep `permissions: {}` at the top, and route user input through `env:`.
-- Verify locally before pushing a workflow change: `docker build -f deploy/Dockerfile -t agentcraft-server:dev .`, then the smoke steps by hand, then Trivy (`aquasec/trivy image --severity CRITICAL --ignore-unfixed --ignorefile deploy/.trivyignore`). From Git Bash, prefix `docker exec` with `MSYS_NO_PATHCONV=1`.
+- Verify a workflow change with the workflow itself (`gh workflow run release-container.yml --ref main`, then `gh run watch`), or by building and smoke-testing on the colo in a throwaway compose project and volume. Never on the owner's machine. Trivy runs in the workflow (`--ignorefile deploy/.trivyignore`). From Git Bash, prefix remote `docker exec` paths with `MSYS_NO_PATHCONV=1`, and omit the leading slash in `gh api` paths.
 - Shell scripts that run in the container must keep LF endings (`.gitattributes`). The Dockerfile also strips CR.
 
 Report what you ran, what you observed, and what is left for the owner to do on the host.

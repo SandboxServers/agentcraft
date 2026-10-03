@@ -157,4 +157,9 @@ Rules:
   `~/.agentcraft`.
 - **This fork is public: never commit the colo server's address, hostnames, SSH alias or credentials.**
   The colo pulls releases (GHCR `latest-prerelease` + a scoped Watchtower); nothing pushes to it.
-- Tell the owner before long builds or anything touching the colo; confirm before deploying.
+- Tell the owner before long builds or anything touching the colo; confirm before changing anything
+  there. Read-only inspection over the owner's SSH alias is fine. The colo also runs Cimmeria; keep the
+  Watchtower isolation labels in `deploy/compose.yaml` (deploy.md, "Sharing the host").
+- **Docker and Watchtower experiments run on the colo, not on the owner's machine.** Never run a
+  Watchtower without `--label-enable` or `--scope`: it updates every container on the host
+  (`docs/multiplayer/audit.md` A-51).

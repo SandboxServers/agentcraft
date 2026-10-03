@@ -45,13 +45,13 @@ Proposed defaults are what the campaign builds against. The owner can change any
 | D-MP06 | **Game mode on the shared server:** creative and peaceful for everyone (as the HQ world forces today), configurable (`forceCreative`). Op commands stay logged in multiplayer. | Proposed | nothing |
 | D-MP07 | **World and plot layout:** a superflat world (grass top y = 64, which the builder assumes), and plots on a square spiral with stride 128. **Plot 0 is the origin**, so singleplayer and QA are unchanged. | Proposed | nothing |
 | D-MP08 | **One studio per player.** Ops can assign or free plots. | Proposed | nothing |
-| D-MP09 | **Release pipeline like Cimmeria's:** gated GHCR releases (`/release` on a merged PR, or a manual dispatch from `main`), a Trivy gate, a persistence smoke test, `latest-prerelease` promotion, and a Watchtower on the colo that pulls (never pushed to). It uses its own Watchtower scope beside Cimmeria's, takes a world backup before every swap, and stores no host details in the repo or its secrets. | **Decided** (owner, 2026-10-03); shipped with the plan | nothing |
+| D-MP09 | **Release pipeline like Cimmeria's** (live on the colo since 2026-10-03; see audit §11): gated GHCR releases (`/release` on a merged PR, or a manual dispatch from `main`), a Trivy gate, a persistence smoke test, `latest-prerelease` promotion, and a Watchtower on the colo that pulls (never pushed to). It uses its own Watchtower scope beside Cimmeria's, takes a world backup before every swap, and stores no host details in the repo or its secrets. | **Decided** (owner, 2026-10-03); shipped with the plan | nothing |
 
 ## Open questions for the owner
 
 1. Confirm or change D-MP01 (the public default). It is the one decision that shapes what other players can see.
 2. Confirm D-MP05: should visitors be able to build anywhere, or only outside plots?
-3. Who is on the first whitelist, and do you want a `/release` now to put today's singleplayer-HQ server on the colo as a preview? It runs, but without the campaign, remote players see broken agents (A-13).
+3. Who is on the first whitelist? The colo already runs today's server (as a preview; remote players' agents don't render correctly until the campaign lands, A-13). Players also need the edge to forward TCP 25565 (A-53).
 4. Should the cast's `upstream-sync-steward` open a conversation with upstream about contributing multiplayer later (D-MP04)?
 
 ## Packet status

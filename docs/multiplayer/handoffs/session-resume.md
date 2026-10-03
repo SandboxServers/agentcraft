@@ -5,13 +5,18 @@
 
 ## State: planned, Wave 0 ready to dispatch
 
-MP-00 (the spike and this plan) is committed on `main`. Nothing is built for multiplayer yet. **Nothing has been deployed to the colo.** The release pipeline exists (`.github/workflows/release-container.yml`, `deploy/`) but has never been run on GitHub; it was verified locally only.
+MP-00 (the spike and this plan) is on `main`. Nothing is built for multiplayer yet.
+
+**The colo runs the AgentCraft server** (deployed 2026-10-03; today's singleplayer-HQ build, so a remote player's agents will not render correctly until the campaign lands):
+- The stack is in `/opt/agentcraft` (compose plus `.env`, root, mode 600). The world is in the `agentcraft-data` volume.
+- It is published on TCP 25565 with a whitelist.
+- Its Watchtower is isolated from Cimmeria's, which was verified by restarting Cimmeria's Watchtower (audit A-48).
+- The first release `v2026-10-03.1` passed every gate on GitHub. The package is public, so the colo pulls it without a login.
 
 ## Before dispatching anything
 
 1. **Node ≥ 22.18** on this machine (it has 22.12; A-04/A-05). Until then `foreman/` `npm run check` shows one failing test that is environmental.
-2. **Push `main`** to `origin` (the plan commits are local until the owner says to push). `workflow_dispatch` and `/release` only work once the workflow files are on the default branch.
-3. Optional, owner-confirmed: one `/release` (or a manual dispatch) to prove the pipeline on GitHub's runners. That publishes `ghcr.io/sandboxservers/agentcraft-server`. Set the package visibility, or log the colo into GHCR, before Watchtower can pull it.
+2. **Port forwarding:** confirm that the colo network's edge forwards TCP 25565 to the host (audit A-53), then whitelist the first players (deploy.md).
 
 ## Dispatching Wave 0
 
