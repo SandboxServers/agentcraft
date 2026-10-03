@@ -76,6 +76,13 @@ function Fail([string]$Message, [string[]]$Tail) {
     exit 1
 }
 
+# --- Node prerequisite (before setup or dependency installation) ---------------------------------
+
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (-not $node) { Fail 'Node 22.18 or newer is required. `node` is not on PATH (https://nodejs.org).' }
+$nodeVer = (& $node.Source --version).Trim()
+if ([version]$nodeVer.TrimStart('v') -lt [version]'22.18.0') { Fail "Node 22.18 or newer is required (you have $nodeVer)" }
+
 # --- resolve options -----------------------------------------------------------------------------
 
 $showcaseOn = $Showcase.IsPresent -or [bool]$ShowcaseAt
@@ -124,11 +131,6 @@ Write-Kv 'checkout' $Root
 Write-Kv 'home' "$AgentHome  (profile $ForemanProfile)"
 
 # --- prerequisites -------------------------------------------------------------------------------
-
-$node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) { Fail 'Node.js 22+ is required (https://nodejs.org). `node` is not on PATH.' }
-$nodeVer = (& $node.Source --version).Trim()
-if ([int]($nodeVer.TrimStart('v').Split('.')[0]) -lt 22) { Fail "Node.js 22+ is required (found $nodeVer)" }
 
 # npm dependencies: installed when node_modules is missing (first run) or older than the lockfile
 # (after a pull that changed dependencies). Never while something of ours may be using them.

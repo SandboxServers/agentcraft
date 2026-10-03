@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Decision } from '../src/protocol.js';
 import { MERGE_OPTIONS } from '../src/protocol.js';
+import { parseTestOutput } from '../src/repos.js';
 import { git, gitOut } from '../src/util/git.js';
 import { demoRepo, makeForeman, rmrf, tempDir, type Harness } from './helpers.js';
 
@@ -252,6 +253,9 @@ describe('RepoManager', () => {
   });
 
   it('runs the repo test command and reports failures', async () => {
+    for (const prefix of ['#', 'ℹ']) {
+      expect(parseTestOutput(`${prefix} tests 10\n${prefix} pass 10\n${prefix} fail 0\n`).summary).toBe('tests 10, pass 10, fail 0');
+    }
     const res = await h.fm.repos.runTests('demo-app');
     expect(res.pass).toBe(true);
     expect(res.summary).toMatch(/pass \d+/);
