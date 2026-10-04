@@ -17,7 +17,8 @@ public final class MpLog {
         for (int i=0; i<fields.length; i+=2) {
             String key=String.valueOf(fields[i]);
             if (!key.matches("[a-z_]+")) throw new IllegalArgumentException("invalid telemetry key");
-            line.append(' ').append(key).append('=').append(String.valueOf(fields[i+1]).replaceAll("[\\s\\p{Cntrl}§=]", "_"));
+            // \s and \p{Cntrl} are ASCII-only here: Cc adds NEL, Zl/Zp the line and paragraph separators, Cf the bidi and zero-width controls.
+            line.append(' ').append(key).append('=').append(String.valueOf(fields[i+1]).replaceAll("[\\s\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}§=]", "_"));
         }
         String message=line.toString();
         CAPTURES.forEach(c -> c.lines.add(message));
