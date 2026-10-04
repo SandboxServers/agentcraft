@@ -1,7 +1,7 @@
 # Deploying the AgentCraft server
 
 > Type: how-to. Audience: the operator of a self-updating host (the colo).
-> Updated: 2026-10-03. Companions: [campaign README](README.md), [`deploy/`](../../deploy), [release workflow](../../.github/workflows/release-container.yml).
+> Updated: 2026-10-04 (MP-14: seeded multiplayer config, extended smoke test). Companions: [campaign README](README.md), [`deploy/`](../../deploy), [release workflow](../../.github/workflows/release-container.yml), [player install](player-install.md).
 
 This repository is public. **Never commit a host's address, hostname, SSH alias or any credential.** Host-specific values live only in `.env` on the host.
 
@@ -13,7 +13,7 @@ The pipeline is the same shape as Cimmeria's. Nothing in GitHub can reach the co
 2. `release-container.yml` builds `deploy/Dockerfile` from `main` HEAD. That image is the mod jar from `mod/`, Fabric 26.3 with Fabric API, the vanilla server and libraries pre-downloaded, and `rcon-cli`.
 3. The image is scanned with Trivy. A CRITICAL finding blocks the release, except entries in `deploy/.trivyignore`, each with a reason and an expiry.
 4. The dated tag `ghcr.io/sandboxservers/agentcraft-server:<YYYY-MM-DD.N>` is pushed with provenance and an SBOM.
-5. The smoke test runs what the colo does on every update: boot, studio build, backup hook, graceful stop, restart on the same volume, and a check that a placed block survived.
+5. The smoke test runs what the colo does on every update: boot, the server-config seed and load, the studio build, the backup hook, a graceful stop, a restart on the same volume, and a check that a placed block survived. The shipped config keeps `enabled: false`; a further boot mounts an `enabled: true` copy, so the multiplayer config path is exercised without switching a live server on.
 6. Only then does `latest-prerelease` move, and a GitHub pre-release is created with `compose.yaml` and `.env.example` attached.
 7. On the colo, the AgentCraft Watchtower notices the new `latest-prerelease` digest within 5 minutes. It runs `backup.sh` in the running container, stops it gracefully (the world saves), and starts the new image on the same volume.
 
@@ -76,18 +76,46 @@ AGENTCRAFT_IMAGE=ghcr.io/sandboxservers/agentcraft-server:<previous YYYY-MM-DD.N
 docker compose up -d
 ```
 
-Watchtower leaves a pinned tag alone until you remove the pin. Once multiplayer lands (campaign MP-F onward), `"enabled": false` in `/data/config/agentcraft-server.json` turns every multiplayer code path off without a rollback.
+Watchtower leaves a pinned tag alone until you remove the pin. To turn multiplayer off without rolling back the image, set `enabled: false` in the volume's `/data/config/agentcraft-server.json` and restart (see ["Multiplayer config"](#multiplayer-config)).
 
 ## What the image does on start
 
 - It refuses to start unless `EULA=TRUE`.
 - It links the image's launcher, libraries and Minecraft into `/data`, and refreshes the Fabric launcher cache when the image changes.
 - It mounts mods from the image only. Extra operator mods go in `/data/mods-extra`.
+- It seeds `config/agentcraft-server.json` once, from `deploy/server/config/` (see "Multiplayer config" below).
 - It seeds `server.properties` once:
-  - a superflat world with the grass top at y = 64, which the studio builder requires;
-  - level name `AgentCraft HQ`, so the HQ rules apply and the studio builds on first start;
+  - a superflat world with the grass top at y = 64, which the studio builder requires (and which the multiplayer world check keeps enforcing once MP-01 is in the jar);
+  - level name `AgentCraft HQ`, kept deliberately: in multiplayer the rules become config-driven (MP-01) and no longer depend on it, and it is the world folder every existing volume already has, including the restore snippets above;
   - creative, peaceful, whitelist on, and the management server off.
 - It sets RCON from `RCON_PASSWORD`. RCON is never published outside the container.
+
+## Multiplayer config
+
+The image ships [`deploy/server/config/agentcraft-server.json`](../../deploy/server/config/agentcraft-server.json). The entrypoint copies it to `/data/config/agentcraft-server.json` on first start and **never overwrites an existing file**: changing the shipped default does not reach a server that already has one. To change a running server, edit the file in the volume and restart (or recreate) the container.
+
+| Key | Shipped | Effect |
+|---|---|---|
+| `enabled` | `false` | The multiplayer master switch. `false` runs an ordinary AgentCraft server: no hello, no plots, no relay. |
+| `plotStride` | `128` | Spacing of the plot spiral (16-aligned; the studio site needs at least 96). |
+| `autoAllocate` | `true` | Give a joining player the next free plot (MP-03). |
+| `autoBuild` | `true` | Build a newly allocated plot (MP-03). |
+| `forceCreative` | `true` | Switch a joining player to creative (MP-01). |
+| `worldRules` | `true` | Apply the world-wide game rules; `LOG_ADMIN_COMMANDS` stays on in multiplayer (MP-01). |
+| `protectPlots` | `true` | Only the owner and ops may change blocks inside a plot (MP-13). |
+| `relayRadiusChunks` | `12` | How far a player sees other studios' layouts and state. |
+| `publicStatePerSecond` | `4` | Per-player state/event rate limit. |
+| `intentsPerSecond` | `10` | Per-player world-intent rate limit. |
+
+An unknown key or an invalid value logs `config_invalid` and keeps the default. A key whose owning packet (MP-01, MP-03, MP-13) is not yet in the jar is stored and inert, so an early release with `enabled: true` still sends the hello but allocates no plot.
+
+**Why `enabled: false` ships.** The colo updates itself from `latest-prerelease`, so a release must not switch the live server to multiplayer. The flip to `true` is a deliberate close-out step with the owner (MP-Z): edit the file in the volume and restart. Setting it back to `false` turns every multiplayer code path off, so it is also the one-line rollback.
+
+**Before the flip on a world that already has a studio.** Plot 0 is the world origin. The first player who is allocated plot 0 gets the studio built there in full, because a fresh plot has no plan file to keep edits by. A world that already has an HQ at the origin (the preview world on the colo does) loses whatever was changed in it. Take a backup first (see ["Backups and restore"](#backups-and-restore)). There is no setting that starts allocation at index 1; if the existing HQ has to stay as it is, that needs a code change before the flip, not a config edit.
+
+The world must stay superflat with the grass top at y = 64 (A-32). The builder assumes it, and once MP-01 is in the jar a wrong surface logs `config_invalid key=world.surface value=<...> reason=surface_not_64` and the server refuses to start. The image's `generator-settings` already produces that surface.
+
+The release smoke test proves both sides: the image ships `enabled: false` and the entrypoint seeds it (`config_loaded enabled=false`, no `config_invalid`), then a third boot mounts an `enabled: true` copy and checks `config_loaded enabled=true` that the world rules were applied (`world_rules_applied`, MP-01) and that `/agentcraft plot` is registered (MP-03). A release cut before MP-01 and MP-03 are on `main` fails this boot by design. The image smoke has no client, so the hello itself is proved on the MP-H harness and in the owner UAT, not in the release job.
 
 ## Troubleshooting
 
@@ -100,3 +128,4 @@ Watchtower leaves a pinned tag alone until you remove the pin. Once multiplayer 
 | Updates never arrive | The GHCR package is private and the host is not logged in, or `AGENTCRAFT_IMAGE` pins a tag. |
 | The studio is missing or half-built after changing the world type | The builder needs a superflat world with grass at y = 64. Restore a backup, or start a fresh volume. |
 | `docker exec ... /opt/...: no such file` from Git Bash | Use `MSYS_NO_PATHCONV=1`. |
+| The container restarts in a loop and the log says `Refusing to start with multiplayer enabled: ...` | The server does not trust the plot registry in the world folder (`agentcraft/plots.json` under the world's directory in the volume): the file is unreadable, a row was rejected, or it was written with another `plotStride`. The message names the rows or plots. The server stops before its first tick on purpose, so that nobody joins a world whose plots have no owner, and `restart: unless-stopped` brings it back every few seconds. Stop the container, then do one of these in the volume: restore the file from a backup (see ["Backups and restore"](#backups-and-restore)), correct the named rows by hand, set `plotStride` in `/data/config/agentcraft-server.json` back to the value the file was written with, or set `enabled: false` there to run without multiplayer while the file is repaired. The server never rewrites the file in this state. |

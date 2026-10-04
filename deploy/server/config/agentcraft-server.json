@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "plotStride": 128,
+  "autoAllocate": true,
+  "autoBuild": true,
+  "forceCreative": true,
+  "worldRules": true,
+  "protectPlots": true,
+  "relayRadiusChunks": 12,
+  "publicStatePerSecond": 4,
+  "intentsPerSecond": 10
+}

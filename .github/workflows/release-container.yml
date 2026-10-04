@@ -126,15 +126,24 @@ jobs:
           trivyignores: deploy/.trivyignore
 
       # What Watchtower does on the colo, end to end: boot, back up, stop gracefully, start the
-      # image again on the same volume, and check the world survived.
+      # image again on the same volume, and check the world survived. A third boot mounts an
+      # enabled copy of the server config, so the multiplayer config path is smoke-tested without
+      # shipping it live: the shipped config keeps multiplayer off (deploy/server/config/).
       - name: smoke-test the image (boot, studio build, backup, graceful stop, persistence)
         env:
           IMAGE: ${{ steps.img.outputs.image }}:${{ steps.ver.outputs.version }}
         run: |
           set -uo pipefail
           RCON="rcon-cli --host 127.0.0.1 --port 25575 --password smoke-only"
+          # The same ten keys as the shipped seed, with multiplayer on. Mounted only for the last boot.
+          ENABLED_CFG=/tmp/agentcraft-enabled.json
+          cat > "$ENABLED_CFG" <<'JSON'
+          { "enabled": true, "plotStride": 128, "autoAllocate": true, "autoBuild": true,
+            "forceCreative": true, "worldRules": true, "protectPlots": true,
+            "relayRadiusChunks": 12, "publicStatePerSecond": 4, "intentsPerSecond": 10 }
+          JSON
           up() {
-            docker run -d --name smoke -v smoke-data:/data \
+            docker run -d --name smoke -v smoke-data:/data "$@" \
               -e EULA=TRUE -e MEMORY=2G -e RCON_PASSWORD=smoke-only "$IMAGE" >/dev/null
             for i in $(seq 1 90); do
               if logs_have 'Done (' \
@@ -153,11 +162,32 @@ jobs:
           # Never pipe into `grep -q` under pipefail: grep exits at the first match, the writer gets
           # SIGPIPE and the pipeline "fails" although the text is there (a flaky false negative).
           logs_have() { docker logs smoke > /tmp/smoke.log 2>&1; grep -q -- "$1" /tmp/smoke.log; }
+          logs_lack() { docker logs smoke > /tmp/smoke.log 2>&1; ! grep -q -- "$1" /tmp/smoke.log; }
           rcon_says() { docker exec smoke $RCON "$1" > /tmp/rcon.out 2>&1; grep -q -- "$2" /tmp/rcon.out; }
+          down() {
+            dump "$1"
+            if docker inspect smoke >/dev/null 2>&1; then
+              docker stop -t 120 smoke >/dev/null || ok=0
+              docker rm smoke >/dev/null || true
+            fi
+          }
+
+          # The image must ship the seed with multiplayer off, whatever a later release decides.
+          docker run --rm --entrypoint cat "$IMAGE" \
+            /opt/agentcraft/defaults/config/agentcraft-server.json > /tmp/shipped.json 2>/dev/null
+          grep -Eq '"enabled"[[:space:]]*:[[:space:]]*false' /tmp/shipped.json \
+            || { echo "::error::the shipped config is not enabled=false"; exit 1; }
 
           ok=1
+          # Boot 1: the shipped config (multiplayer off) seeds and builds the studio.
           up || ok=0
           if [ "$ok" = 1 ]; then
+            logs_have 'Seeded config/agentcraft-server.json.' \
+              || { echo "::error::the entrypoint did not seed the server config"; ok=0; }
+            logs_have 'event=config_loaded enabled=false file=config/agentcraft-server.json' \
+              || { echo "::error::the shipped config did not load with enabled=false"; ok=0; }
+            logs_lack 'event=config_invalid' \
+              || { echo "::error::the shipped config has an invalid key"; ok=0; }
             logs_have 'AgentCraft common init done' || { echo "::error::mod did not initialise"; ok=0; }
             logs_have "Published layout 'studio'" || { echo "::error::studio was not built"; ok=0; }
             docker exec smoke $RCON "forceload add 0 0" >/dev/null
@@ -165,16 +195,30 @@ jobs:
             rcon_says "setblock 5 70 5 minecraft:gold_block" 'Changed the block' || { echo "::error::setblock failed"; ok=0; }
             docker exec smoke /opt/agentcraft/bin/backup.sh || { echo "::error::backup hook failed"; ok=0; }
           fi
-          dump "first start"
-          docker stop -t 120 smoke >/dev/null || ok=0
-          docker rm smoke >/dev/null
+          down "first start"
+          # Boot 2: the same volume and shipped config, as Watchtower restarts it. The studio and the
+          # placed block must survive.
           if [ "$ok" = 1 ]; then
             up || ok=0
             rcon_says "execute if block 5 70 5 minecraft:gold_block" 'Test passed' \
               || { echo "::error::world change did not survive a graceful stop"; ok=0; }
             logs_have 'Loaded layout' || { echo "::error::layout not reloaded"; ok=0; }
-            dump "after restart"
           fi
+          down "after restart"
+          # Boot 3: mount an enabled config to exercise the multiplayer load path. The smoke has no
+          # client, so this proves config_loaded, not the hello (MP-14 Decision).
+          if [ "$ok" = 1 ]; then
+            up -v "$ENABLED_CFG:/data/config/agentcraft-server.json:ro" || ok=0
+            logs_have 'event=config_loaded enabled=true file=config/agentcraft-server.json' \
+              || { echo "::error::the enabled config did not load"; ok=0; }
+            # MP-01 applies the world rules by config on an enabled server.
+            logs_have 'event=world_rules_applied' \
+              || { echo "::error::the world rules were not applied"; ok=0; }
+            # Once MP-03 is in the jar, /help lists the plot sub-commands; RCON runs as owner.
+            rcon_says "help agentcraft" 'plot' \
+              || { echo "::error::plot commands are not registered"; ok=0; }
+          fi
+          down "enabled config"
           docker rm -f smoke >/dev/null 2>&1 || true
           docker volume rm smoke-data >/dev/null 2>&1 || true
           [ "$ok" = 1 ] || { echo "::error::smoke test failed"; exit 1; }
