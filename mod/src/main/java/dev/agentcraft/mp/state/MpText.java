@@ -15,4 +15,19 @@ public final class MpText {
         }
         return clean.toString();
     }
+    /** The wire's caps are also refused where a record is built: an oversized one fails in its caller, on the caller's thread, and never reaches the encoder. */
+    public static String cap(String field, String text, int cap) {
+        if (text == null) throw new IllegalArgumentException(field+" is missing");
+        if (text.length() > cap) throw new IllegalArgumentException(field+" exceeds "+cap+" characters");
+        return text;
+    }
+    public static void capOptional(String field, String text, int cap) { if (text != null) cap(field,text,cap); }
+    public static void cap(String field, java.util.Collection<?> items, int cap) {
+        if (items.size() > cap) throw new IllegalArgumentException(field+" exceeds "+cap+" entries");
+    }
+    /** The game's own rule for an identifier path, {@code [a-z0-9/._-]}: what a published agent id or skin has to be. */
+    public static boolean isPath(String text) { return text != null && net.minecraft.resources.Identifier.isValidPath(text); }
+    public static void path(String field, String text, int cap) {
+        if (!isPath(cap(field,text,cap))) throw new IllegalArgumentException(field+" is not a resource path");
+    }
 }

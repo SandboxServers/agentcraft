@@ -26,6 +26,16 @@ final class MpCodecs {
     static int integer(RegistryFriendlyByteBuf b,int min,int max) {
         int n=b.readVarInt(); if(n<min || n>max) throw new IllegalArgumentException("integer out of range"); return n;
     }
+    /**
+     * A hello's protocol is read first, and the rest of another protocol's hello is skipped, never parsed: the game
+     * disconnects on unread bytes and on a decoder error, which would end the connection before the versions are compared.
+     * The mismatch carries the sender's protocol and placeholders; the receiver refuses it by the protocol alone.
+     */
+    static <T> T hello(RegistryFriendlyByteBuf b,IntFunction<T> mismatch,IntFunction<T> same) {
+        int protocol=integer(b,0,Integer.MAX_VALUE);
+        if(protocol==MpProtocol.VERSION) return same.apply(protocol);
+        b.skipBytes(b.readableBytes()); return mismatch.apply(protocol);
+    }
     static StudioId studio(RegistryFriendlyByteBuf b) { return StudioId.of(b.readUUID()); }
     static boolean bool(RegistryFriendlyByteBuf b) {
         int n=b.readUnsignedByte(); if(n>1) throw new IllegalArgumentException("invalid boolean"); return n==1;
