@@ -7,13 +7,21 @@ import dev.agentcraft.command.AgentCraftCommands;
 import dev.agentcraft.layout.Anchor;
 import dev.agentcraft.layout.AnchorNames;
 import dev.agentcraft.layout.Anchors;
+import dev.agentcraft.mp.Plot;
+import dev.agentcraft.mp.Plots;
+import dev.agentcraft.mp.StudioId;
+import dev.agentcraft.mp.server.plot.PlotFeature;
+import dev.agentcraft.mp.server.plot.PlotSpawn;
 import dev.agentcraft.world.HqWorld;
 import java.util.Locale;
+import java.util.Optional;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.minecraft.core.BlockPos;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -39,6 +47,10 @@ public final class HqFeature {
 		// A fresh HQ world (no saved layout yet) gets the default HQ built before the player joins, so
 		// the first launch walks straight into it. AGENTCRAFT_HQ_AUTOBUILD=0 turns this off.
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+			// PlotFeature owns multiplayer builds. This path would paint a LOCAL studio at the origin.
+			if (PlotFeature.multiplayer(server)) {
+				return;
+			}
 			if (!HqWorld.isHq(server) || !Anchors.current().isEmpty() || !autoBuild()) {
 				return;
 			}
@@ -53,6 +65,7 @@ public final class HqFeature {
 			}
 		});
 		AgentCraftCommands.sub(root -> root.then(Commands.literal("hq")
+			.requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
 			.executes(ctx -> build(ctx, HqBuilders.defaultId(), false))
 			.then(Commands.literal("force").executes(ctx -> build(ctx, HqBuilders.defaultId(), true)))
 			.then(Commands.argument("builder", StringArgumentType.word())
@@ -78,21 +91,46 @@ public final class HqFeature {
 			ctx.getSource().sendFailure(Component.literal("Unknown HQ builder '" + id + "' (known: " + HqBuilders.ids() + ")"));
 			return 0;
 		}
+		CommandSourceStack source = ctx.getSource();
+		HqBuilder.Options options;
+		ServerPlayer owner = null;
+		if (PlotFeature.multiplayer(source.getServer())) {
+			// The caller's own plot. There is no plot argument on this command.
+			owner = source.getPlayer();
+			if (owner == null) {
+				source.sendFailure(Component.literal("A player is required to build a plot."));
+				return 0;
+			}
+			Optional<Plot> plot = Plots.directory().plotOf(StudioId.of(owner.getUUID()));
+			if (plot.isEmpty()) {
+				source.sendFailure(Component.literal("You have no plot."));
+				return 0;
+			}
+			options = new HqBuilder.Options(force, plot.get().origin(), plot.get().owner());
+		} else {
+			options = new HqBuilder.Options(force);
+		}
 		Anchors.Layout layout;
 		try {
-			layout = buildAndPublish(ctx.getSource().getLevel(), builder, new HqBuilder.Options(force));
+			layout = buildAndPublish(source.getLevel(), builder, options);
 		} catch (RuntimeException e) {
 			AgentCraft.LOGGER.error("HQ builder '{}' failed", id, e);
 			ctx.getSource().sendFailure(Component.literal("HQ builder '" + id + "' failed: " + e));
 			return 0;
 		}
+		if (owner != null) PlotSpawn.applyRespawn(owner, layout);
 		String report = lastReport;
 		ctx.getSource().sendSuccess(() -> Component.literal("Built HQ '" + id + "': " + layout.anchors().size() + " anchors"
 			+ (report == null ? "" : ". " + report)), true);
 		return layout.anchors().size();
 	}
 
-	/** Runs {@code builder} (server thread), publishes its layout and moves the world spawn to its spawn anchor. */
+	/** Builds {@code studio}'s plot at {@code origin}. The world spawn is not moved. */
+	public static Anchors.Layout buildPlot(ServerLevel level, HqBuilder builder, boolean force, BlockPos origin, StudioId studio) {
+		return buildAndPublish(level, builder, new HqBuilder.Options(force, origin, studio));
+	}
+
+	/** Runs {@code builder} (server thread) and publishes its layout. Singleplayer also moves the world spawn. */
 	public static Anchors.Layout buildAndPublish(ServerLevel level, HqBuilder builder) {
 		return buildAndPublish(level, builder, HqBuilder.Options.DEFAULT);
 	}
@@ -105,12 +143,16 @@ public final class HqFeature {
 		Anchors.Builder anchors = Anchors.builder(builder.id());
 		lastReport = builder.build(level, anchors, options);
 		Anchors.Layout layout = anchors.build();
-		Anchors.publish(level.getServer(), layout);
-		Anchor spawn = layout.get(AnchorNames.SPAWN);
-		if (spawn != null) {
-			level.getServer().getCommands().performPrefixedCommand(level.getServer().createCommandSourceStack().withSuppressedOutput(),
-				String.format(Locale.ROOT, "setworldspawn %d %d %d %.1f 0", (int) Math.floor(spawn.x()), (int) Math.floor(spawn.y()),
-					(int) Math.floor(spawn.z()), spawn.yaw()));
+		if (PlotFeature.multiplayer(level.getServer())) {
+			layout = PlotFeature.publishBuilt(level.getServer(), options.studio(), layout);
+		} else {
+			Anchors.publish(level.getServer(), layout);
+			Anchor spawn = layout.get(AnchorNames.SPAWN);
+			if (spawn != null) {
+				level.getServer().getCommands().performPrefixedCommand(level.getServer().createCommandSourceStack().withSuppressedOutput(),
+					String.format(Locale.ROOT, "setworldspawn %d %d %d %.1f 0", (int) Math.floor(spawn.x()), (int) Math.floor(spawn.y()),
+						(int) Math.floor(spawn.z()), spawn.yaw()));
+			}
 		}
 		AgentCraft.LOGGER.info("HQ '{}' built in {} ms{}", builder.id(), (System.nanoTime() - t0) / 1_000_000,
 			lastReport == null ? "" : ": " + lastReport);
