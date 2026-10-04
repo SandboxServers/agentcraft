@@ -1,0 +1,301 @@
+package dev.agentcraft.mp.plot;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import dev.agentcraft.layout.Anchor;
+import dev.agentcraft.layout.AnchorNames;
+import dev.agentcraft.layout.Anchors;
+import dev.agentcraft.mp.MpLog;
+import dev.agentcraft.mp.MpReasons;
+import dev.agentcraft.mp.MpServerConfig;
+import dev.agentcraft.mp.Plot;
+import dev.agentcraft.mp.PlotDirectory;
+import dev.agentcraft.mp.PlotGrid;
+import dev.agentcraft.mp.Plots;
+import dev.agentcraft.mp.StudioId;
+import dev.agentcraft.mp.net.HelloS2C;
+import dev.agentcraft.mp.net.MpPayloads;
+import dev.agentcraft.mp.server.plot.PlotCommands;
+import dev.agentcraft.mp.server.plot.PlotFeature;
+import dev.agentcraft.mp.server.plot.PlotRebuilds;
+import dev.agentcraft.mp.server.plot.PlotRegistry;
+import dev.agentcraft.mp.server.plot.PlotStore;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.players.CachedUserNameToIdResolver;
+import net.minecraft.server.players.NameAndId;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/** Registry, persistence and profile-cache rules. No running server. */
+class PlotRegistryTest {
+    private static final MpServerConfig ENABLED = new MpServerConfig(true, 128, true, false, true, true, true, 12, 4, 10);
+
+    @Test
+    void allocation_follows_the_spiral_and_a_second_call_does_not_log(@TempDir Path dir) {
+        PlotRegistry registry = new PlotRegistry();
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        try (var capture = MpLog.capture()) {
+            Plot a = registry.allocateStored(dir, StudioId.of(first), 128).plot();
+            Plot b = registry.allocateStored(dir, StudioId.of(second), 128).plot();
+            var again = registry.allocateStored(dir, StudioId.of(first), 128);
+            assertEquals(0, a.index());
+            assertEquals(BlockPos.ZERO, a.origin());
+            assertEquals(1, b.index());
+            assertEquals(PlotGrid.originOf(1, 128), b.origin());
+            assertEquals(0, a.origin().getX() % 16);
+            assertEquals(0, b.origin().getZ() % 16);
+            assertFalse(a.box().intersects(b.box()));
+            assertEquals(a, registry.plotAt(new BlockPos(0, 64, 0)).orElseThrow());
+            assertTrue(registry.plotAt(new BlockPos(64, 64, 0)).isEmpty());
+            assertFalse(again.created());
+            assertEquals(a, again.plot());
+            List<String> allocated = capture.lines().stream().filter(line -> line.startsWith("event=plot_allocated ")).toList();
+            assertEquals(2, allocated.size());
+            assertTrue(allocated.get(0).contains("index=0"));
+            assertTrue(allocated.get(0).contains("origin=0,0,0"));
+        }
+    }
+
+    @Test
+    void an_overlapping_origin_is_skipped(@TempDir Path dir) {
+        PlotRegistry registry = new PlotRegistry();
+        UUID sitting = UUID.randomUUID();
+        registry.replaceAll(List.of(new Plot(0, StudioId.of(sitting), PlotGrid.originOf(1, 128))));
+        Plot next = registry.allocateStored(dir, StudioId.of(UUID.randomUUID()), 128).plot();
+        assertEquals(2, next.index());
+        assertEquals(PlotGrid.originOf(2, 128), next.origin());
+    }
+
+    @Test
+    void a_full_grid_logs_grid_full_and_adds_nothing(@TempDir Path dir) {
+        int stride = 1_048_576;
+        int full = 0;
+        while (full < 100_000) {
+            try {
+                PlotGrid.originOf(full, stride);
+                full++;
+            } catch (IllegalArgumentException e) {
+                break;
+            }
+        }
+        assertTrue(full < 100_000, "expected an origin past the world border");
+        List<Plot> seeded = new ArrayList<>();
+        for (int i = 0; i < full; i++) seeded.add(new Plot(i, StudioId.of(UUID.randomUUID()), PlotGrid.originOf(i, stride)));
+        PlotRegistry registry = new PlotRegistry();
+        registry.replaceAll(seeded);
+        UUID late = UUID.randomUUID();
+        try (var capture = MpLog.capture()) {
+            var result = registry.allocateStored(dir, StudioId.of(late), stride);
+            assertNull(result.plot());
+            assertEquals(MpReasons.GRID_FULL, result.failure());
+            assertEquals(full, registry.all().size());
+            assertTrue(registry.plotOf(StudioId.of(late)).isEmpty());
+            assertTrue(capture.lines().stream().anyMatch(line ->
+                line.startsWith("event=plot_allocation_failed ") && line.contains("reason=grid_full")));
+        }
+    }
+
+    @Test
+    void a_save_failure_logs_io_error_and_rolls_back(@TempDir Path dir) throws Exception {
+        Path blocker = dir.resolve("not-a-directory");
+        Files.writeString(blocker, "x");
+        PlotRegistry registry = new PlotRegistry();
+        UUID player = UUID.randomUUID();
+        try (var capture = MpLog.capture()) {
+            var result = registry.allocateStored(blocker, StudioId.of(player), 128);
+            assertNull(result.plot());
+            assertEquals(MpReasons.IO_ERROR, result.failure());
+            assertTrue(registry.all().isEmpty());
+            var assigned = registry.assignStored(blocker, StudioId.of(player), 0, 128);
+            assertNull(assigned.plot());
+            assertEquals(PlotRegistry.Refuse.IO, assigned.refuse());
+            assertTrue(registry.all().isEmpty());
+            assertTrue(capture.lines().stream().anyMatch(line ->
+                line.startsWith("event=plot_allocation_failed ") && line.contains("reason=io_error")));
+        }
+    }
+
+    @Test
+    void a_frozen_registry_does_not_replace_a_corrupt_file(@TempDir Path dir) throws Exception {
+        Path file = PlotStore.plotsFile(dir);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "{");
+        byte[] before = Files.readAllBytes(file);
+        PlotStore.Loaded loaded = PlotStore.load(dir);
+        assertTrue(loaded.failed());
+        assertTrue(loaded.plots().isEmpty());
+        PlotRegistry registry = new PlotRegistry();
+        registry.freeze();
+        try (var capture = MpLog.capture()) {
+            var result = registry.allocateStored(dir, StudioId.of(UUID.randomUUID()), 128);
+            assertEquals(MpReasons.IO_ERROR, result.failure());
+            assertTrue(registry.all().isEmpty());
+            assertArrayEquals(before, Files.readAllBytes(file));
+            assertTrue(capture.lines().stream().anyMatch(line -> line.contains("reason=io_error")));
+        }
+    }
+
+    @Test
+    void a_string_index_is_not_a_path_and_negative_indexes_are_rejected(@TempDir Path dir) throws Exception {
+        UUID owner = UUID.randomUUID();
+        Path file = PlotStore.plotsFile(dir);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "{\"plots\":[{\"index\":\"../x\",\"owner\":\"" + owner + "\",\"x\":0,\"y\":0,\"z\":0}]}");
+        PlotStore.Loaded loaded = PlotStore.load(dir);
+        assertTrue(loaded.plots().isEmpty());
+        assertFalse(loaded.failed());
+        assertEquals(1, loaded.skipped());
+        assertFalse(Files.exists(dir.resolve("x")));
+        assertTrue(PlotStore.plotDirectory(dir, -1).isEmpty());
+
+        Path keep = dir.resolve("agentcraft").resolve("plots").resolve("keep.txt");
+        Files.createDirectories(keep.getParent());
+        Files.writeString(keep, "stay");
+        Path secret = dir.resolve("agentcraft").resolve("secrets");
+        Files.writeString(secret, "stay");
+        Path plot = PlotStore.plotDirectory(dir, 0).orElseThrow();
+        Files.createDirectories(plot);
+        Files.writeString(plot.resolve("anchors.json"), "{}");
+        assertTrue(PlotStore.deletePlotDirectory(dir, 0));
+        assertFalse(Files.exists(plot));
+        assertEquals("stay", Files.readString(keep));
+        assertEquals("stay", Files.readString(secret));
+    }
+
+    @Test
+    void plots_and_anchors_round_trip(@TempDir Path dir) {
+        UUID owner = UUID.randomUUID();
+        PlotRegistry registry = new PlotRegistry();
+        Plot plot = registry.allocateStored(dir, StudioId.of(owner), 128).plot();
+        Anchor spawn = new Anchor(AnchorNames.SPAWN, 0.5, 66, 22.5, 180, 0);
+        Anchors.Layout layout = new Anchors.Layout("studio", 3, null, java.util.Map.of(AnchorNames.SPAWN, spawn));
+        assertTrue(PlotStore.saveAnchors(dir, plot.index(), layout));
+
+        PlotRegistry loaded = new PlotRegistry();
+        PlotStore.Loaded rows = PlotStore.load(dir);
+        assertFalse(rows.failed());
+        loaded.replaceAll(rows.plots());
+        Plot back = loaded.plotOf(StudioId.of(owner)).orElseThrow();
+        assertEquals(plot.index(), back.index());
+        assertEquals(plot.origin(), back.origin());
+        Anchor restored = PlotStore.loadAnchors(dir, plot.index()).orElseThrow().get(AnchorNames.SPAWN);
+        assertEquals(spawn.x(), restored.x());
+        assertEquals(spawn.y(), restored.y());
+        assertEquals(spawn.z(), restored.z());
+    }
+
+    @Test
+    void hello_reads_the_allocated_index(@TempDir Path dir) {
+        UUID player = UUID.randomUUID();
+        PlotDirectory previous = Plots.directory();
+        PlotRegistry registry = new PlotRegistry();
+        Plots.install(registry);
+        try {
+            registry.allocateStored(dir, StudioId.of(player), 128);
+            HelloS2C hello = MpPayloads.helloFor(player, ENABLED, true, true).orElseThrow();
+            assertEquals(0, hello.plotIndex());
+            assertTrue(MpPayloads.helloFor(player, ENABLED, false, true).isEmpty());
+        } finally {
+            Plots.install(previous);
+        }
+    }
+
+    @Test
+    void the_multiplayer_gate_needs_both_dedicated_and_enabled() {
+        assertFalse(PlotFeature.multiplayer(false, true));
+        assertFalse(PlotFeature.multiplayer(true, false));
+        assertTrue(PlotFeature.multiplayer(true, true));
+    }
+
+    @Test
+    void the_profile_cache_matches_stored_names_and_honours_expiry(@TempDir Path dir) throws Exception {
+        UUID expired = UUID.randomUUID();
+        Path file = dir.resolve("usercache.json");
+        Files.writeString(file, "[{\"uuid\":\"" + expired + "\",\"name\":\"OldPlayer\",\"expiresOn\":\"2000-01-01 00:00:00 +0000\"}]");
+        var cache = new CachedUserNameToIdResolver(null, file.toFile());
+        assertTrue(cache.get(expired).isPresent(), "the expired row is still in the cache");
+        assertTrue(PlotCommands.knownCached(cache, "OldPlayer").isEmpty());
+
+        UUID fresh = UUID.randomUUID();
+        cache.add(new NameAndId(fresh, "CachedOwner"));
+        assertEquals(fresh, PlotCommands.knownCached(cache, "cachedowner").orElseThrow());
+        assertTrue(PlotCommands.knownCached(cache, "NotAPlayer").isEmpty());
+    }
+
+    @Test
+    void local_is_not_allocated_and_is_not_logged(@TempDir Path dir) {
+        PlotRegistry registry = new PlotRegistry();
+        try (var capture = MpLog.capture()) {
+            var result = registry.allocateStored(dir, StudioId.LOCAL, 128);
+            assertNull(result.plot());
+            assertFalse(result.created());
+            assertTrue(capture.lines().isEmpty());
+            assertTrue(registry.all().isEmpty());
+        }
+    }
+
+    @Test
+    void plot_origin_bounds_reject_integer_min_and_accept_the_boundary(@TempDir Path dir) throws Exception {
+        // Integer.MIN_VALUE must be rejected on both axes: Math.abs is negative but MIN % 16 == 0.
+        assertTrue(loadOne(dir, Integer.MIN_VALUE, 0).plots().isEmpty());
+        assertTrue(loadOne(dir, 0, Integer.MIN_VALUE).plots().isEmpty());
+        assertEquals(1, loadOne(dir, Integer.MIN_VALUE, 0).skipped());
+        assertEquals(1, loadOne(dir, 0, Integer.MIN_VALUE).skipped());
+        // The signed boundaries themselves are valid: ±30_000_000 are multiples of 16.
+        assertEquals(-30_000_000, loadOne(dir, -30_000_000, 0).plots().get(0).origin().getX());
+        assertEquals(30_000_000, loadOne(dir, 30_000_000, 0).plots().get(0).origin().getX());
+        assertEquals(-30_000_000, loadOne(dir, 0, -30_000_000).plots().get(0).origin().getZ());
+        assertEquals(30_000_000, loadOne(dir, 0, 30_000_000).plots().get(0).origin().getZ());
+        // One step outside is rejected on both axes in both directions.
+        assertTrue(loadOne(dir, 30_000_016, 0).plots().isEmpty());
+        assertTrue(loadOne(dir, -30_000_016, 0).plots().isEmpty());
+        assertTrue(loadOne(dir, 0, 30_000_016).plots().isEmpty());
+        assertTrue(loadOne(dir, 0, -30_000_016).plots().isEmpty());
+    }
+
+    @Test
+    void a_rejected_row_does_not_reserve_its_index(@TempDir Path dir) throws Exception {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        Path file = PlotStore.plotsFile(dir);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "{\"plots\":["
+            + "{\"index\":0,\"owner\":\"" + a + "\",\"x\":0,\"y\":0,\"z\":0},"
+            + "{\"index\":1,\"owner\":\"" + a + "\",\"x\":16,\"y\":0,\"z\":0},"
+            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":16,\"y\":0,\"z\":0}]}");
+        PlotStore.Loaded loaded = PlotStore.load(dir);
+        assertFalse(loaded.failed());
+        assertEquals(2, loaded.plots().size());
+        assertEquals(1, loaded.skipped());
+        assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 1 && plot.owner().equals(StudioId.of(b))),
+            "the valid third row is accepted after the second is rejected for its owner");
+        assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 0 && plot.owner().equals(StudioId.of(a))));
+    }
+
+    private static PlotStore.Loaded loadOne(Path dir, int x, int z) throws Exception {
+        UUID owner = UUID.randomUUID();
+        assertTrue(PlotStore.save(dir, List.of(new Plot(0, StudioId.of(owner), new BlockPos(x, 0, z)))));
+        return PlotStore.load(dir);
+    }
+
+    @Test
+    void rebuild_window_ends_after_exactly_1200_ticks() {
+        UUID id = UUID.randomUUID();
+        PlotRebuilds.clear();
+        try {
+            PlotRebuilds.note(id, 1000);
+            assertFalse(PlotRebuilds.allowed(id, 1000 + 1199), "1199 ticks is still inside the window");
+            assertTrue(PlotRebuilds.allowed(id, 1000 + 1200), "1200 ticks ends the window");
+            assertEquals(1, PlotRebuilds.remainingSeconds(id, 1000 + 1199));
+            assertEquals(0, PlotRebuilds.remainingSeconds(id, 1000 + 1200));
+        } finally {
+            PlotRebuilds.clear();
+        }
+    }
+}
