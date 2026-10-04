@@ -8,7 +8,7 @@
 - **Packet:** MP-B, baseline; packet number 90, branch `mp/MP-B-baseline`.
 - **Base:** `main` @ `b40768d`.
 - **Machine:** macOS, Apple Silicon, Node v24.18.0, npm 12.0.1.
-- **Scope:** matrix-owned engine declarations, launcher Node checks and README prerequisite; coordinator-authorized exception for summary parsing and its existing test.
+- **Scope:** matrix-owned engine declarations, launcher Node checks and README prerequisite; coordinator-authorized exceptions for summary and failing-name parsing in `parseTestOutput`, its tests, and two prerequisite lines in `tools/README.md`.
 - **Review requirement:** the parser lives in **`foreman/src/repos.ts`**. This change needs **agent-sandbox-guardian** review before merge. Independent reviews are left to the coordinator per `SWARM.md`.
 
 ## What was built
@@ -16,11 +16,11 @@
 | File | Change |
 |---|---|
 | `foreman/package.json`, `tools/package.json` | Require Node `>=22.18`. |
-| `tools/launch.ps1` | Compare the full Node version against 22.18.0 before option setup, directory creation or npm installation; report the installed version on rejection. |
+| `tools/launch.ps1` | Compare Node major/minor versions before setup, accept prerelease suffixes, and fail closed with the installed version on rejection; resolve summary paths before any `Fail`. |
 | `tools/mac.mjs` | Compare major/minor versions before setup; allow later major versions; report the installed version on rejection. |
-| `README.md` | Quick-start prerequisite is Node 22.18+. |
-| `foreman/src/repos.ts` | One-line summary regex accepts TAP `#` and spec-reporter `ℹ` prefixes. |
-| `foreman/test/repos.test.ts` | Existing integration test also asserts exact summary parsing for both prefixes, retaining 482 tests. |
+| `README.md`, `tools/README.md` | Quick-start and both launcher prerequisites are Node 22.18+. |
+| `foreman/src/repos.ts` | Accept TAP/spec summaries; strip spec durations and omit the failure-section header from failing names. |
+| `foreman/test/repos.test.ts` | Independent `parseTestOutput` describe contains one summary test and two captured-output name fixtures; full suite now contains 485 tests. |
 
 ## Root cause of the extra finding
 
@@ -46,7 +46,7 @@ The parser matched only `^# <counter> <number>$`, so it returned `{ failures: []
 
 Regression fixtures were added before the parser fix and failed on the `ℹ` case, then passed after the one-line change. They also retain TAP coverage independent of the installed Node's default reporter.
 
-## What was run
+## Initial verification (3b581ab)
 
 All logs below are gitignored under `artifacts/logs/`. Commands are from the worktree root unless stated.
 
@@ -69,16 +69,48 @@ All logs below are gitignored under `artifacts/logs/`. Commands are from the wor
 | `pwsh -NoProfile -NonInteractive -File tools/launch.ps1 -Backend sim -NoGame -NoForeman -DryRun -Home "$PWD/.agentcraft-home" -Profile mp-90 -Port 27981 -DevPort 8081` | Node guard passes; exit 1 later in existing dependency setup: `Get-Item` cannot read hidden `tools/node_modules/.package-lock.json` on macOS | `mp-b-ps-launch.log` |
 | `git diff --check` | Green | Tool output |
 
-The restricted sandbox explicitly denies `ps` (`operation not permitted`), accounting for the process-table and stopped-turn cleanup failures. The unrestricted checks are green; no process code was changed. The tests use fake SDKs, not the real API. No client/server or live Foreman was started. PowerShell's generated `StartupProfileData-NonInteractive` artifact was removed.
+The initial restricted sandbox explicitly denied `ps` (`operation not permitted`), accounting for the process-table and stopped-turn cleanup failures. The initial unrestricted checks were green; no process code was changed. The tests use fake SDKs, not the real API. No client/server or live Foreman was started. PowerShell's generated `StartupProfileData-NonInteractive` artifact was removed.
 
 ## Deviations and open risks
 
 - No in-game QA: this packet does not touch rendering, HQ or agents. No Minecraft signature or source-generation work was needed.
 - Actual Windows launcher operation was not verified on Windows. PowerShell 7 on macOS validates its syntax/guard; its unrelated hidden-file failure is documented above and not changed.
 - The seven-version matrix simulates version metadata; only Node v24.18.0 actually ran the full suites.
-- No multiplayer contract or telemetry changes. No push, PR, Docker, SSH, colo access or release.
+- No multiplayer contract or telemetry changes. The coordinator opened PR #2; the worker did not push or open a PR. Review fixes are left uncommitted under the strict sandbox, as requested.
+- **Accepted Node 23 gap (MP-B-7):** engines and both guards accept 23.0–23.5. These end-of-life releases lack default type stripping until 23.6, per the Node documentation cited in the review findings, and can exhibit the audit’s vacuous sim-test pass. The coordinator accepts this gap; only Node 24.18.0 was actually exercised, and no version-range change was made.
 
 ## Contract change requests
 
-- **Authorized exception used:** `foreman/src/repos.ts` and `foreman/test/repos.test.ts`, summary parsing only. Coordinator should schedule agent-sandbox-guardian and upstream-sync-steward review for this upstream file exception, plus the normal test reviewer.
-- **Requested follow-up:** authorize/synchronize the root package engine metadata in `foreman/package-lock.json` and `tools/package-lock.json` (`packages[""].engines.node`, currently `>=22`, should become `>=22.18`). These lockfiles are outside MP-B's matrix and outside the summary-only exception, so they remain untouched. `npm ci` and both required suites pass with the existing lockfiles.
+- **Authorized exceptions used:** `foreman/src/repos.ts` (only `parseTestOutput`), `foreman/test/repos.test.ts`, and exactly two prerequisite lines in `tools/README.md`. No further scope is requested. The coordinator reports that the initial sandbox-guardian review confirmed pass/fail is derived from the exit code and that only `director.ts` consumes `failures`; these facts were also checked against the code for the review fixes.
+- **Lockfile request closed (MP-B-5):** coordinator decision is to leave both package-lock files untouched. Their root engine metadata remains `>=22`; the package manifests require `>=22.18`. Initial `npm ci` passed with this mismatch.
+
+## Review fixes
+
+All seven findings were checked against the current code before edits. None required rejecting the reviewer’s claim. The worker left them uncommitted under the strict sandbox; the coordinator re-ran the full suite outside the sandbox (see the end of this section) and committed them.
+
+| Item | Verification and action |
+|---|---|
+| MP-B-1 | Reproduced the sim’s failing TAGS_V1 tests with `npm test --silent` and explicit TAP under Node 24.18.0. Spec parsing initially yielded 4 entries for 3 failures (duration suffixes plus `failing tests:`); TAP yielded the 3 clean names. Changed only the fallback in `parseTestOutput` to strip terminal `(N.NNNms)` durations and skip that header. Added exact-name fixtures from captured reporter excerpts; the spec fixture failed before the fix and passed after. Full captures: `artifacts/logs/mp-b-failing-spec.log` and `mp-b-failing-tap.log`. |
+| MP-B-2 | Reproduced the `[version]` cast failure on release candidates/nightlies in a temporary launcher copy. Replaced it with major/minor parsing and comparison. Blank, malformed and out-of-range numeric output fail with the required message rather than a conversion exception. |
+| MP-B-3 | Reproduced the stray temp file/missing summary when PowerShell’s location differed from process cwd. Moved `SummaryJson` resolution before the first possible `Fail`. All rejection cases now write the expected error JSON in the PowerShell location and leave no misplaced temp file. |
+| MP-B-4 | Moved summary assertions out of the order-dependent repo integration test into `describe('parseTestOutput', ...)`. It runs independently by name. One summary test plus two failing-output fixtures increase the full count from 482 to 485. |
+| MP-B-5 | Confirmed the root engine metadata mismatch; no edits to either package-lock file, as directed. |
+| MP-B-6 | Confirmed both stale launcher prerequisites; changed exactly those two lines in `tools/README.md` to Node 22.18+. |
+| MP-B-7 | Confirmed code accepts Node 23.0 and recorded the coordinator-accepted 23.0–23.5 capability gap under open risks; no code change. |
+
+Review-fix verification, on Node v24.18.0:
+
+| Command/check | Result | Log under `artifacts/logs/` |
+|---|---|---|
+| `cd foreman && npx vitest run test/repos.test.ts -t parseTestOutput` | Before fallback fix: 2 pass / 1 fail. After: **3 pass**, 21 unrelated tests skipped. Runs without the repo-registration test. | `mp-b-review-parser-red.log`, `mp-b-review-parser-green.log` |
+| `python3 artifacts/logs/mp-b-review-launcher.py` | **11/11 cases pass** after fixes (3/11 before). Executes only a temporary copy of `launch.ps1` and its helper under this worktree’s `artifacts/`, with fake Node, `-NoGame -NoForeman -DryRun`, packet ports 27981/8081 and an isolated home. Tests stable versions, supported/unsupported prereleases, a nightly, malformed/empty output and numeric overflow, with relative summaries and mismatched PowerShell/process directories throughout. Copies are removed afterward. | `mp-b-review-launcher-before.log`, `mp-b-review-launcher-after.log` |
+| `cd foreman && npm run check` | Typecheck passes; **483 passed / 2 failed / 485 total**. Only the expected process-table and orphan-cleanup tests fail under the strict sandbox. The command stops before protocol freshness because Vitest returns nonzero. | `mp-b-review-foreman-check.log` |
+| `cd foreman && npm run check:protocol-doc` | Protocol document current; run separately because the full check stopped at the two sandbox failures. | `mp-b-review-protocol.log` |
+| `npm test --prefix tools` | **10/10 passed**. | `mp-b-review-tools.log` |
+| `git diff --check` | Clean. | Tool output |
+
+The two Foreman failures are `test/proc.test.ts > reads the real process table and kills only a process that is still the same one` (process table undefined) and `test/claude-handoff.test.ts > stop kills what the stopped turn started (orphans of the CLI too)` (explicit log: `could not read the process table`). The sandbox denies `ps`; those tests and their implementation were not changed. A green full-suite result requires the coordinator’s unrestricted rerun. Windows PowerShell 5.1 and actual Node 23 runtimes were not available for verification; launcher probing used installed PowerShell 7 and mocked version output. The real launcher was not run during these fixes.
+
+Proposed commit subject: `Fix test-output parsing and launcher validation after MP-B review`.
+
+**Coordinator verification (outside the sandbox, macOS, Node v24.18.0):** `npm run check` in `foreman/` is **485/485** with typecheck and protocol freshness green; `npm test --prefix tools` is **10/10**; `git diff --check` is clean. The new `launch.ps1` guard logic, run on its own under `pwsh`, accepts v22.18.0, v22.18.0-rc.1, v23.0.0, v24.18.0 and a v25 nightly, and rejects v21.9.0, v22.17.9, non-version output and empty output with the required message. Still not verified: Windows PowerShell 5.1 and a real Windows launch.

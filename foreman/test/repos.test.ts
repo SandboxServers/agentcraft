@@ -253,13 +253,46 @@ describe('RepoManager', () => {
   });
 
   it('runs the repo test command and reports failures', async () => {
-    for (const prefix of ['#', 'ℹ']) {
-      expect(parseTestOutput(`${prefix} tests 10\n${prefix} pass 10\n${prefix} fail 0\n`).summary).toBe('tests 10, pass 10, fail 0');
-    }
     const res = await h.fm.repos.runTests('demo-app');
     expect(res.pass).toBe(true);
     expect(res.summary).toMatch(/pass \d+/);
     expect(res.failures).toEqual([]);
+  });
+});
+
+describe('parseTestOutput', () => {
+  it('reads summaries from TAP and spec-reporter lines', () => {
+    for (const prefix of ['#', 'ℹ']) {
+      expect(parseTestOutput(`${prefix} tests 10\n${prefix} pass 10\n${prefix} fail 0\n`).summary).toBe('tests 10, pass 10, fail 0');
+    }
+  });
+
+  // Reporter excerpts captured on Node 24.18.0 from the sim's failing TAGS_V1 tests.
+  it.each([
+    ['spec', `✖ parseTags keeps hyphenated tags (0.446ms)
+✖ a # inside a word is not a tag (0.092ms)
+✖ hasTag accepts the tag with or without # (0.093458ms)
+ℹ tests 15
+ℹ pass 12
+ℹ fail 3
+✖ failing tests:
+✖ parseTags keeps hyphenated tags (0.446ms)
+✖ a # inside a word is not a tag (0.092ms)
+✖ hasTag accepts the tag with or without # (0.093458ms)
+`],
+    ['TAP', String.raw`not ok 12 - parseTags keeps hyphenated tags
+not ok 14 - a \# inside a word is not a tag
+not ok 15 - hasTag accepts the tag with or without \#
+# tests 15
+# pass 12
+# fail 3
+`],
+  ])('reads exact failing test names from %s output', (_reporter, output) => {
+    expect(parseTestOutput(output).failures).toEqual([
+      'parseTags keeps hyphenated tags',
+      'a # inside a word is not a tag',
+      'hasTag accepts the tag with or without #',
+    ]);
   });
 });
 

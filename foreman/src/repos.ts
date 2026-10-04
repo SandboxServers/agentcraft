@@ -66,7 +66,12 @@ export interface TestResult {
 export function parseTestOutput(text: string): { failures: string[]; summary?: string } {
   const failures: string[] = [];
   for (const m of text.matchAll(/^not ok \d+ - (.+)$/gm)) failures.push(m[1]!.replace(/\\#/g, '#').replace(/\s+#\s*(TODO|SKIP).*$/i, '').trim());
-  if (!failures.length) for (const m of text.matchAll(/^\s*(?:✖|×|FAIL)\s+(.+)$/gm)) failures.push(m[1]!.trim());
+  if (!failures.length) {
+    for (const m of text.matchAll(/^\s*(?:✖|×|FAIL)\s+(.+)$/gm)) {
+      const name = m[1]!.trim().replace(/\s+\(\d+(?:\.\d+)?ms\)$/, '');
+      if (name !== 'failing tests:') failures.push(name);
+    }
+  }
   const nums: string[] = [];
   for (const k of ['tests', 'pass', 'fail']) {
     const m = new RegExp(`^[#ℹ] ${k} (\\d+)$`, 'm').exec(text); // TAP or Node's spec reporter
