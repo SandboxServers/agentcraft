@@ -20,6 +20,7 @@ import dev.agentcraft.mp.state.PublicStudioState;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
@@ -45,10 +46,11 @@ public final class PublishFeature {
         Foreman.addListener(listener(scheduler, PublishFeature::track, PublishFeature::open, store::current, Foreman::state));
         // Mode listeners already run on the client thread; execute() keeps a netty caller off the scheduler.
         MpMode.addListener(mode -> Minecraft.getInstance().execute(() -> {
-            if (MpMode.current() == MpMode.MULTIPLAYER) scheduler.reconnect();
+            modeChanged(mode, scheduler);
         }));
         ClientTickEvents.END_CLIENT_TICK.register(mc -> tick(mc, scheduler));
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, build) -> register(dispatcher, store, scheduler));
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, build) -> register(dispatcher, store, scheduler,
+            MpMode::current, source -> source.getPlayer().getUUID(), () -> Anchors.self().owner()));
     }
 
     public static ForemanListener listener(PublishScheduler scheduler, BooleanSupplier track, BooleanSupplier multiplayer,
@@ -83,35 +85,52 @@ public final class PublishFeature {
     }
 
     public static void tick(Minecraft mc, PublishScheduler scheduler) {
-        if (mc.player == null || mc.getConnection() == null) return;
-        switch (PublishGate.action(MpMode.current(), channels())) {
+        tick(scheduler, MpMode.current(), mc.player != null && mc.getConnection() != null, channels());
+    }
+
+    /** Tick entry point shared by production and tests; {@code connected} includes player and connection. */
+    public static void tick(PublishScheduler scheduler, MpMode mode, boolean connected, boolean channelsOpen) {
+        if (!connected || mode == MpMode.SINGLEPLAYER) return;
+        switch (PublishGate.action(mode, channelsOpen)) {
             case NONE -> { }
             case REFUSE -> scheduler.flush(System.nanoTime(), false);
             case SEND -> scheduler.flush(System.nanoTime(), true);
         }
     }
 
-    public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher, PolicyStore store, PublishScheduler scheduler) {
+    public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher, PolicyStore store,
+            PublishScheduler scheduler, Supplier<MpMode> mode, Function<FabricClientCommandSource, UUID> player,
+            Supplier<UUID> studio) {
         var root = ClientCommands.literal("agentcraft-public").executes(ctx -> {
             ctx.getSource().sendFeedback(Component.literal(describe(store.current())));
             return 1;
         });
         for (String flag : FLAGS) {
             root.then(ClientCommands.literal(flag)
-                .executes(ctx -> apply(ctx.getSource(), store, scheduler, flag, null))
+                .executes(ctx -> apply(ctx.getSource(), store, scheduler, flag, null, mode, player, studio))
                 .then(ClientCommands.argument("value", BoolArgumentType.bool())
-                    .executes(ctx -> apply(ctx.getSource(), store, scheduler, flag, BoolArgumentType.getBool(ctx, "value")))));
+                    .executes(ctx -> apply(ctx.getSource(), store, scheduler, flag,
+                        BoolArgumentType.getBool(ctx, "value"), mode, player, studio))));
         }
         dispatcher.register(root);
     }
 
-    /** {@code value} null toggles. The player and studio are the caller's, never text from the command. */
-    public static String applyPolicy(PolicyStore store, String flag, boolean value, UUID player, UUID studio, @Nullable PublishScheduler scheduler) {
+    /** Mode callback seam: only entering multiplayer requires a fresh published projection. */
+    public static void modeChanged(MpMode mode, PublishScheduler scheduler) {
+        if (mode == MpMode.MULTIPLAYER) scheduler.reconnect();
+    }
+
+    /** {@code value} null toggles. Changes are private to a connected AgentCraft multiplayer session. */
+    public static String applyPolicy(PolicyStore store, String flag, boolean value, Supplier<MpMode> mode,
+            Supplier<UUID> player, Supplier<UUID> studio, @Nullable PublishScheduler scheduler) {
+        if (mode.get() != MpMode.MULTIPLAYER) {
+            return describe(store.current()) + " Flags can be changed while connected to an AgentCraft multiplayer server.";
+        }
         int before = store.bits();
         store.set(flag, value);
         int after = store.bits();
         if (before != after) {
-            MpLog.event(MpEvents.POLICY_CHANGED, "player", player, "studio", studio, "before", before, "after", after);
+            MpLog.event(MpEvents.POLICY_CHANGED, "player", player.get(), "studio", studio.get(), "before", before, "after", after);
             if (scheduler != null) scheduler.markDirty();
         }
         return describe(store.current());
@@ -122,11 +141,11 @@ public final class PublishFeature {
             + " taskTitles=" + policy.taskTitles() + " goalText=" + policy.goalText();
     }
 
-    private static int apply(FabricClientCommandSource source, PolicyStore store, PublishScheduler scheduler, String flag, @Nullable Boolean value) {
+    private static int apply(FabricClientCommandSource source, PolicyStore store, PublishScheduler scheduler, String flag,
+            @Nullable Boolean value, Supplier<MpMode> mode, Function<FabricClientCommandSource, UUID> player,
+            Supplier<UUID> studio) {
         boolean next = value != null ? value : !PolicyStore.flag(store.current(), flag);
-        // The acting player is the command source's player. There is no player argument to forge.
-        UUID player = source.getPlayer().getUUID();
-        String text = applyPolicy(store, flag, next, player, Anchors.self().owner(), scheduler);
+        String text = applyPolicy(store, flag, next, mode, () -> player.apply(source), studio, scheduler);
         source.sendFeedback(Component.literal(text));
         return 1;
     }

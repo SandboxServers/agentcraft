@@ -18,6 +18,7 @@ import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicJson;
 import dev.agentcraft.mp.state.PublicPolicy;
 import dev.agentcraft.mp.state.PublicStudioState;
+import dev.agentcraft.mp.state.PublicTask;
 import dev.agentcraft.mp.state.StationWire;
 import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +29,7 @@ import java.util.Set;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import org.junit.jupiter.api.Test;
+import org.opentest4j.AssertionFailedError;
 
 class PublishRedactorTest {
     @Test void flags_off_showcase_bytes_contain_no_private_text() {
@@ -38,6 +40,37 @@ class PublishRedactorTest {
         assertNull(Redactor.redact(state, PublicPolicy.DEFAULT).tasks());
         for (PublicAgent agent : Redactor.redact(state, PublicPolicy.DEFAULT).agents()) assertNull(agent.activity());
         assertNull(Redactor.redact(state, PublicPolicy.DEFAULT).goal().text());
+    }
+
+    @Test void marker_scan_catches_private_values_after_public_clipping_and_each_flag_adds_only_its_marker() {
+        ForemanState state = markedState();
+        List<String> markers = List.of("ZQ1", "ZQ2", "ZQ3", "ZQ4", "ZQ5", "ZQ6", "ZQ7", "ZQ8", "ZQ9");
+        PublicStudioState hidden = Redactor.redact(state, PublicPolicy.DEFAULT);
+        String hiddenStateJson = PublicJson.toJson(hidden).toString();
+        String hiddenStatePacket = new String(stateBytes(hidden), StandardCharsets.UTF_8);
+        PublicEvent hiddenSay = Redactor.say(state, new Protocol.AgentSay("ada", "ZQ4 private say", "user", 1), PublicPolicy.DEFAULT);
+        String hiddenEventPacket = new String(eventBytes(hiddenSay), StandardCharsets.UTF_8);
+        assertMarkersHidden(markers, hiddenStateJson + hiddenStatePacket + hiddenEventPacket);
+
+        List<PublicPolicy> policies = List.of(new PublicPolicy(true, false, false, false),
+            new PublicPolicy(false, false, true, false), new PublicPolicy(false, false, false, true));
+        List<String> flagMarkers = List.of("ZQ1", "ZQ2", "ZQ3");
+        for (int i = 0; i < policies.size(); i++) {
+            PublicStudioState projection = Redactor.redact(state, policies.get(i));
+            String publicBytes = PublicJson.toJson(projection) + new String(stateBytes(projection), StandardCharsets.UTF_8);
+            assertEquals(flagMarkers.get(i), markerIn(publicBytes, markers));
+        }
+
+        PublicEvent.Say shownSay = (PublicEvent.Say) Redactor.say(state,
+            new Protocol.AgentSay("ada", "ZQ4 private say", "user", 1), new PublicPolicy(false, true, false, false));
+        assertEquals("ZQ4", markerIn(new String(eventBytes(shownSay), StandardCharsets.UTF_8), markers));
+
+        ForemanState clipped = ForemanStates.fromSnapshot(JsonParser.parseString("""
+            {"agents":[{"id":"ada","name":"Ada","skin":"ada","state":"idle","station":"desk","activity":"ZQ1%s"}]}
+            """.formatted("x".repeat(80))).getAsJsonObject());
+        String clippedOutput = PublicJson.toJson(Redactor.redact(clipped, policies.getFirst())).toString();
+        assertTrue(clippedOutput.contains("ZQ1"));
+        assertThrows(AssertionFailedError.class, () -> assertMarkersHidden(markers, clippedOutput));
     }
 
     @Test void activity_flag_adds_only_activity() {
@@ -203,6 +236,73 @@ class PublishRedactorTest {
         assertEquals(published, roundTrip(published));
     }
 
+    @Test void task_title_blank_after_clipping_and_sanitizing_is_omitted_without_changing_counts() {
+        ForemanState state = ForemanStates.fromSnapshot(JsonParser.parseString("""
+            {"tasks":[
+              {"id":"t-space","title":"   ","status":"todo"},
+              {"id":"t-format","title":"§c","status":"todo"},
+              {"id":"t-visible","title":"Visible","status":"todo"},
+              {"id":"t-unknown","title":"Unknown","status":"not-a-status"}]}
+            """).getAsJsonObject());
+        PublicStudioState published = Redactor.redact(state, new PublicPolicy(false, false, true, false));
+        assertEquals(List.of("t-visible"), published.tasks().stream().map(PublicTask::id).toList());
+        assertEquals(3, published.counts().todo());
+    }
+
+    @Test void task_limit_keeps_only_the_first_32_publishable_tasks() {
+        StringBuilder tasks = new StringBuilder();
+        for (int i = 0; i < 33; i++) {
+            if (i > 0) tasks.append(',');
+            tasks.append("{\"id\":\"t-").append(i).append("\",\"title\":\"Title ").append(i)
+                .append("\",\"status\":\"todo\"}");
+        }
+        ForemanState state = ForemanStates.fromSnapshot(JsonParser.parseString("{\"tasks\":[" + tasks + "]}").getAsJsonObject());
+        PublicStudioState published = Redactor.redact(state, new PublicPolicy(false, false, true, false));
+        assertEquals(32, published.tasks().size());
+        assertEquals("t-31", published.tasks().getLast().id());
+        assertFalse(published.tasks().stream().anyMatch(task -> task.id().equals("t-32")));
+        assertEquals(33, published.counts().todo());
+    }
+
+    @Test void say_text_is_clipped_to_120_but_length_is_the_original_length() {
+        ForemanState state = ForemanStates.showcase();
+        String text = "Z".repeat(140);
+        PublicEvent.Say say = (PublicEvent.Say) Redactor.say(state,
+            new Protocol.AgentSay("marlow", text, "user", 1), new PublicPolicy(false, true, false, false));
+        assertEquals(120, say.text().length());
+        assertEquals(text.substring(0, 120), say.text());
+        assertEquals(140, say.length());
+    }
+
+    @Test void goal_progress_is_finite_bounded_and_absent_goal_maps_to_none() {
+        var nonFiniteJson = JsonParser.parseString("{}").getAsJsonObject();
+        var goal = new com.google.gson.JsonObject();
+        goal.addProperty("id", "g");
+        goal.addProperty("text", "secret");
+        goal.addProperty("progress", Double.NaN);
+        goal.addProperty("status", "active");
+        nonFiniteJson.add("goal", goal);
+        PublicStudioState nonFinite = Redactor.redact(ForemanStates.fromSnapshot(nonFiniteJson), PublicPolicy.DEFAULT);
+        assertEquals(0f, nonFinite.goal().progress());
+        assertTrue(Float.isFinite(nonFinite.goal().progress()));
+
+        var aboveOneJson = JsonParser.parseString("{}").getAsJsonObject();
+        var aboveOneGoal = new com.google.gson.JsonObject();
+        aboveOneGoal.addProperty("id", "g");
+        aboveOneGoal.addProperty("text", "secret");
+        aboveOneGoal.addProperty("progress", Double.MAX_VALUE);
+        aboveOneGoal.addProperty("status", "active");
+        aboveOneJson.add("goal", aboveOneGoal);
+        ForemanState aboveOneState = ForemanStates.fromSnapshot(aboveOneJson);
+        PublicStudioState aboveOne = Redactor.redact(aboveOneState, PublicPolicy.DEFAULT);
+        assertEquals(1f, aboveOne.goal().progress());
+
+        PublicStudioState noGoal = Redactor.redact(ForemanStates.fromSnapshot(JsonParser.parseString("{}").getAsJsonObject()), PublicPolicy.DEFAULT);
+        assertEquals(GoalStatusWire.NONE, noGoal.goal().status());
+        assertEquals(0f, noGoal.goal().progress());
+        assertNull(noGoal.goal().text());
+    }
+
     @Test void caps_drop_the_extra_agent_repo_and_duplicate_clipped_id() {
         StringBuilder agents = new StringBuilder();
         StringBuilder repos = new StringBuilder();
@@ -272,6 +372,29 @@ class PublishRedactorTest {
 
     private static PublicAgent agent(PublicStudioState state, String id) {
         return state.agents().stream().filter(agent -> agent.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    private static ForemanState markedState() {
+        return ForemanStates.fromSnapshot(JsonParser.parseString("""
+            {
+              "agents":[{"id":"ada","name":"Ada","skin":"ada","state":"idle","station":"desk","activity":"ZQ1 private activity"}],
+              "tasks":[{"id":"t1","title":"ZQ2 private task title","status":"todo","assignee":"ada"}],
+              "decisions":[{"id":"d1","agentId":"ada","kind":"question","question":"ZQ5 private decision question","status":"open","taskId":"t1"}],
+              "repos":[{"id":"ZQ7-private-repo","name":"ZQ8 private repo name","path":"ZQ9-private-path","branch":"main","ci":"pass"}],
+              "goal":{"id":"g","text":"ZQ3 private goal","progress":0.5,"status":"active"},
+              "logs":[{"agentId":"ada","entries":[{"ts":1,"kind":"text","text":"ZQ6 private log"}]}]
+            }
+            """).getAsJsonObject());
+    }
+
+    private static void assertMarkersHidden(List<String> markers, String haystack) {
+        for (String marker : markers) assertFalse(haystack.contains(marker), marker);
+    }
+
+    private static String markerIn(String haystack, List<String> markers) {
+        List<String> found = markers.stream().filter(haystack::contains).toList();
+        assertEquals(1, found.size(), found.toString());
+        return found.getFirst();
     }
 
     private static String published(PublicStudioState state) {

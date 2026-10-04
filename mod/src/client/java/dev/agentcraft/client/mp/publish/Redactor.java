@@ -61,7 +61,7 @@ public final class Redactor {
                 String id = clip(task.id(), 48);
                 if (id.isEmpty()) continue;
                 String title = clip(task.title(), 80);
-                if (title.isBlank()) title = id;
+                if (title.isBlank()) continue;
                 String assignee = ids.get(task.assignee());
                 tasks.add(new PublicTask(id, title, status, assignee));
             }
@@ -117,9 +117,11 @@ public final class Redactor {
     private static GoalSummary goal(ForemanState state, PublicPolicy policy) {
         Protocol.Goal goal = state.goal();
         if (goal == null || goal.status() == Protocol.GoalStatus.UNKNOWN) return new GoalSummary(GoalStatusWire.NONE, 0f, null);
-        float progress = (float) goal.progress();
-        if (!Float.isFinite(progress) || progress < 0f) progress = 0f;
-        else if (progress > 1f) progress = 1f;
+        double rawProgress = goal.progress();
+        float progress;
+        if (!Double.isFinite(rawProgress) || rawProgress < 0d) progress = 0f;
+        else if (rawProgress > 1d) progress = 1f;
+        else progress = (float) rawProgress;
         return new GoalSummary(GoalStatusWire.valueOf(goal.status().name()), progress, optIn(goal.text(), 120, policy.goalText()));
     }
 

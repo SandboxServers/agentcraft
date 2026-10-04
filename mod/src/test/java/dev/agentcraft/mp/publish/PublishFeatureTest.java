@@ -3,113 +3,208 @@ package dev.agentcraft.mp.publish;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.mojang.brigadier.CommandDispatcher;
-import com.mojang.brigadier.tree.CommandNode;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import dev.agentcraft.client.foreman.ForemanState;
+import dev.agentcraft.client.foreman.ForemanStates;
+import dev.agentcraft.client.foreman.Protocol;
 import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.client.mp.publish.PolicyStore;
 import dev.agentcraft.client.mp.publish.PublishFeature;
-import dev.agentcraft.client.mp.publish.PublishGate;
 import dev.agentcraft.client.mp.publish.PublishScheduler;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
+import dev.agentcraft.mp.MpReasons;
+import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicPolicy;
-import java.lang.reflect.Proxy;
+import dev.agentcraft.mp.state.PublicStudioState;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
+import java.util.concurrent.atomic.AtomicReference;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+import net.minecraft.network.chat.Component;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class PublishFeatureTest {
-    @Test void singleplayer_does_not_send_even_when_the_channel_is_open() {
-        assertEquals(PublishGate.Action.NONE, PublishGate.action(MpMode.SINGLEPLAYER, true));
-        assertEquals(PublishGate.Action.NONE, PublishGate.action(MpMode.SINGLEPLAYER, false));
-        assertEquals(PublishGate.Action.REFUSE, PublishGate.action(MpMode.REMOTE_VANILLA, true));
-        assertEquals(PublishGate.Action.SEND, PublishGate.action(MpMode.MULTIPLAYER, true));
-        assertEquals(PublishGate.Action.REFUSE, PublishGate.action(MpMode.MULTIPLAYER, false));
-        assertEquals(PublishGate.QUIET, PublishGate.of(MpMode.SINGLEPLAYER));
-    }
+    private static final UUID PLAYER = UUID.nameUUIDFromBytes("publish-command-player".getBytes());
+    private static final UUID STUDIO = UUID.nameUUIDFromBytes("publish-command-studio".getBytes());
 
-    @Test void policy_change_logs_the_caller_and_not_the_file(@TempDir Path dir) {
-        Path file = dir.resolve("SENTINEL_CONFIG_PATH").resolve("agentcraft-public.json");
-        PolicyStore store = PolicyStore.load(file);
-        UUID player = UUID.nameUUIDFromBytes("policy-player".getBytes());
-        UUID studio = UUID.nameUUIDFromBytes("policy-studio".getBytes());
-        UUID forged = UUID.nameUUIDFromBytes("forged-player".getBytes());
-        var sent = new java.util.ArrayList<dev.agentcraft.mp.state.PublicStudioState>();
-        PublishScheduler scheduler = new PublishScheduler(dev.agentcraft.client.foreman.ForemanStates::showcase, store::current, () -> 4,
-            () -> forged, () -> forged, () -> 9, new PublishScheduler.Out() {
-                @Override public void state(dev.agentcraft.mp.state.PublicStudioState state) { sent.add(state); }
-                @Override public void event(dev.agentcraft.mp.state.PublicEvent event) {}
-            });
+    @Test void tick_obeys_mode_connection_and_both_channels() {
+        Harness quiet = new Harness(10);
+        quiet.scheduler.markDirty();
         try (var capture = MpLog.capture()) {
-            String feedback = PublishFeature.applyPolicy(store, "activityText", true, player, studio, scheduler);
-            assertEquals("activityText=true sayText=false taskTitles=false goalText=false", feedback);
-            assertFalse(feedback.contains("SENTINEL_CONFIG_PATH"));
-            assertEquals(1, capture.lines().size());
-            String line = capture.lines().get(0);
-            assertTrue(line.startsWith("event=" + MpEvents.POLICY_CHANGED));
-            assertTrue(line.contains("player=" + player));
-            assertTrue(line.contains("studio=" + studio));
-            assertTrue(line.contains("before=0"));
-            assertTrue(line.contains("after=1"));
-            assertFalse(line.contains(forged.toString()));
-            assertFalse(line.contains("SENTINEL_CONFIG_PATH"));
-            assertEquals(feedback, PublishFeature.applyPolicy(store, "activityText", true, player, studio, scheduler));
-            assertEquals(1, capture.lines().size());
-            scheduler.flush(0, true);
-            assertEquals(1, sent.size());
-            assertTrue(sent.get(0).policy().activityText());
-            assertFalse(capture.lines().toString().contains("SENTINEL_CONFIG_PATH"));
+            PublishFeature.tick(quiet.scheduler, MpMode.SINGLEPLAYER, true, true);
+            assertTrue(quiet.states.isEmpty());
+            assertTrue(capture.lines().isEmpty());
+        }
+
+        Harness vanilla = new Harness(10);
+        vanilla.scheduler.markDirty();
+        try (var capture = MpLog.capture()) {
+            PublishFeature.tick(vanilla.scheduler, MpMode.REMOTE_VANILLA, true, true);
+            PublishFeature.tick(vanilla.scheduler, MpMode.REMOTE_VANILLA, true, true);
+            assertTrue(vanilla.states.isEmpty());
+            assertEquals(List.of("event=" + MpEvents.PUBLIC_STATE_SKIPPED + " player=" + PLAYER + " studio=" + STUDIO
+                + " plot=4 rev=0 reason=" + MpReasons.NOT_MULTIPLAYER), capture.lines());
+        }
+
+        Harness closed = new Harness(10);
+        closed.scheduler.markDirty();
+        PublishFeature.tick(closed.scheduler, MpMode.MULTIPLAYER, true, false);
+        assertTrue(closed.states.isEmpty());
+
+        Harness open = new Harness(10);
+        open.scheduler.markDirty();
+        PublishFeature.tick(open.scheduler, MpMode.MULTIPLAYER, true, true);
+        assertEquals(1, open.states.size());
+
+        Harness disconnected = new Harness(10);
+        disconnected.scheduler.markDirty();
+        PublishFeature.tick(disconnected.scheduler, MpMode.MULTIPLAYER, false, true);
+        assertTrue(disconnected.states.isEmpty());
+    }
+
+    @Test void command_views_in_every_mode_and_sets_and_toggles_only_in_multiplayer(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("agentcraft-public.json");
+        PolicyStore store = PolicyStore.load(file);
+        Harness harness = new Harness(10, store::current);
+        AtomicReference<MpMode> mode = new AtomicReference<>(MpMode.SINGLEPLAYER);
+        List<String> feedback = new ArrayList<>();
+        CommandDispatcher<FabricClientCommandSource> dispatcher = dispatcher(store, harness.scheduler, mode, feedback);
+        try (var capture = MpLog.capture()) {
+            for (MpMode current : MpMode.values()) {
+                mode.set(current);
+                assertEquals(1, dispatcher.execute("agentcraft-public", source(feedback)));
+                assertEquals("activityText=false sayText=false taskTitles=false goalText=false", feedback.removeLast());
+            }
+            assertFalse(Files.exists(file));
+            assertTrue(capture.lines().isEmpty());
+
+            mode.set(MpMode.MULTIPLAYER);
+            dispatcher.execute("agentcraft-public activityText true", source(feedback));
+            assertEquals("activityText=true sayText=false taskTitles=false goalText=false", feedback.removeLast());
+            assertTrue(Files.isRegularFile(file));
+            assertEquals(new PublicPolicy(true, false, false, false), store.current());
+            assertTrue(harness.scheduler.isDirty());
+            assertEquals(List.of("event=" + MpEvents.POLICY_CHANGED + " player=" + PLAYER + " studio=" + STUDIO + " before=0 after=1"), capture.lines());
+            harness.scheduler.flush(0, true);
+            assertTrue(harness.states.getLast().policy().activityText());
+
+            dispatcher.execute("agentcraft-public sayText", source(feedback));
+            assertEquals("activityText=true sayText=true taskTitles=false goalText=false", feedback.removeLast());
+            assertEquals(new PublicPolicy(true, true, false, false), store.current());
+            assertTrue(harness.scheduler.isDirty());
+            assertEquals(2, capture.lines().stream().filter(line -> line.startsWith("event=" + MpEvents.POLICY_CHANGED)).count());
+            assertEquals("event=" + MpEvents.POLICY_CHANGED + " player=" + PLAYER + " studio=" + STUDIO + " before=1 after=3",
+                capture.lines().getLast());
         }
     }
 
-    @Test void command_has_no_player_argument_and_leaves_a_forged_id_unparsed(@TempDir Path dir) throws Exception {
-        PolicyStore store = PolicyStore.load(dir.resolve("agentcraft-public.json"));
-        PublishScheduler scheduler = new PublishScheduler(() -> null, () -> PublicPolicy.DEFAULT, () -> 4,
-            () -> UUID.nameUUIDFromBytes("x".getBytes()), () -> UUID.nameUUIDFromBytes("y".getBytes()), () -> -1,
-            new PublishScheduler.Out() {
-                @Override public void state(dev.agentcraft.mp.state.PublicStudioState state) {}
-                @Override public void event(dev.agentcraft.mp.state.PublicEvent event) {}
-            });
+    @Test void set_in_singleplayer_is_read_only_and_unknown_flag_is_refused(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("agentcraft-public.json");
+        PolicyStore store = PolicyStore.load(file);
+        Harness harness = new Harness(10, store::current);
+        AtomicReference<MpMode> mode = new AtomicReference<>(MpMode.SINGLEPLAYER);
+        List<String> feedback = new ArrayList<>();
+        CommandDispatcher<FabricClientCommandSource> dispatcher = dispatcher(store, harness.scheduler, mode, feedback);
+        try (var capture = MpLog.capture()) {
+            dispatcher.execute("agentcraft-public activityText true", source(feedback));
+            assertEquals("activityText=false sayText=false taskTitles=false goalText=false Flags can be changed while connected to an AgentCraft multiplayer server.", feedback.removeLast());
+            assertEquals(PublicPolicy.DEFAULT, store.current());
+            assertFalse(Files.exists(file));
+            assertFalse(harness.scheduler.isDirty());
+            assertTrue(capture.lines().isEmpty());
+            assertThrows(CommandSyntaxException.class, () -> dispatcher.execute("agentcraft-public privateFlag true", source(feedback)));
+            assertEquals(PublicPolicy.DEFAULT, store.current());
+            assertFalse(Files.exists(file));
+            assertTrue(capture.lines().isEmpty());
+        }
+    }
+
+    @Test void listener_marks_each_publication_callback_only_while_tracking() {
+        ForemanState state = ForemanStates.showcase();
+        Protocol.Agent agent = state.agents().values().iterator().next();
+        Protocol.Task task = state.tasks().values().iterator().next();
+        Protocol.Decision decision = state.decisions().values().iterator().next();
+        Protocol.Repo repo = state.repos().values().iterator().next();
+        Protocol.Goal goal = state.goal();
+        var callbacks = List.<java.util.function.Consumer<dev.agentcraft.client.foreman.ForemanListener>>of(
+            listener -> listener.onSnapshot(state),
+            listener -> listener.onAgent(null, agent),
+            listener -> listener.onDecision(null, decision),
+            listener -> listener.onRepo(null, repo),
+            listener -> listener.onGoal(null, goal),
+            listener -> listener.onConnection(state.link()),
+            listener -> listener.onTask(task, task));
+        for (var callback : callbacks) {
+            Harness tracking = new Harness(10);
+            var listener = PublishFeature.listener(tracking.scheduler, () -> true, () -> true, () -> PublicPolicy.DEFAULT, () -> state);
+            callback.accept(listener);
+            assertTrue(tracking.scheduler.isDirty(), callback.toString());
+
+            Harness quiet = new Harness(10);
+            var quietListener = PublishFeature.listener(quiet.scheduler, () -> false, () -> true, () -> PublicPolicy.DEFAULT, () -> state);
+            callback.accept(quietListener);
+            assertFalse(quiet.scheduler.isDirty(), callback.toString());
+            assertTrue(quiet.events.isEmpty());
+        }
+    }
+
+    @Test void entering_multiplayer_reconnects_and_resets_the_revision() {
+        Harness harness = new Harness(10);
+        harness.scheduler.markDirty();
+        harness.scheduler.flush(0, true);
+        harness.patch("thinking");
+        harness.scheduler.markDirty();
+        harness.scheduler.flush(1, true);
+        assertEquals(List.of(1, 2), harness.states.stream().map(PublicStudioState::rev).toList());
+        PublishFeature.modeChanged(MpMode.MULTIPLAYER, harness.scheduler);
+        harness.scheduler.flush(2, true);
+        assertEquals(1, harness.states.getLast().rev());
+    }
+
+    private static CommandDispatcher<FabricClientCommandSource> dispatcher(PolicyStore store, PublishScheduler scheduler,
+            AtomicReference<MpMode> mode, List<String> feedback) {
         CommandDispatcher<FabricClientCommandSource> dispatcher = new CommandDispatcher<>();
-        PublishFeature.register(dispatcher, store, scheduler);
-        CommandNode<FabricClientCommandSource> root = dispatcher.getRoot().getChild("agentcraft-public");
-        assertNotNull(root);
-        assertEquals(java.util.Set.of("activityText", "sayText", "taskTitles", "goalText"),
-            root.getChildren().stream().map(CommandNode::getName).collect(Collectors.toSet()));
-        assertNull(root.getChild("player"));
-        for (String flag : java.util.List.of("activityText", "sayText", "taskTitles", "goalText")) {
-            CommandNode<FabricClientCommandSource> node = root.getChild(flag);
-            assertNotNull(node.getCommand());
-            assertEquals(java.util.Set.of("value"), node.getChildren().stream().map(CommandNode::getName).collect(Collectors.toSet()));
-            assertTrue(node.getChild("value").getChildren().isEmpty());
-        }
-        FabricClientCommandSource source = (FabricClientCommandSource) Proxy.newProxyInstance(
-            FabricClientCommandSource.class.getClassLoader(), new Class<?>[] {FabricClientCommandSource.class},
-            (proxy, method, args) -> { throw new AssertionError(method.getName()); });
-        String forged = UUID.nameUUIDFromBytes("forged-player".getBytes()).toString();
-        var parsed = dispatcher.parse("agentcraft-public sayText true " + forged, source);
-        assertTrue(parsed.getReader().getRemaining().contains(forged));
-        assertFalse(dispatcher.parse("agentcraft-public sayText true", source).getReader().canRead());
-        assertFalse(dispatcher.parse("agentcraft-public", source).getReader().canRead());
+        PublishFeature.register(dispatcher, store, scheduler, mode::get, ignored -> PLAYER, () -> STUDIO);
+        return dispatcher;
     }
 
-    @Test void publisher_source_attributes_the_player_and_does_not_write_the_studio() throws Exception {
-        Path dir = Path.of(System.getProperty("agentcraft.src"), "client", "java", "dev", "agentcraft", "client", "mp", "publish");
-        String feature = Files.readString(dir.resolve("PublishFeature.java"));
-        String joined = Files.list(dir).filter(path -> path.toString().endsWith(".java")).map(path -> {
-            try { return Files.readString(path); }
-            catch (java.io.IOException e) { throw new IllegalStateException(e); }
-        }).collect(Collectors.joining("\n"));
-        assertTrue(feature.contains("PublishGate.action"));
-        assertTrue(feature.contains("getPlayer().getUUID()"));
-        assertTrue(feature.contains("Anchors.self().owner()"));
-        assertTrue(feature.contains("MpMode.current() != MpMode.MULTIPLAYER"));
-        assertFalse(feature.contains("getArgument(\"player\""));
-        assertFalse(feature.contains("getArgument(\"studio\""));
-        assertFalse(joined.contains("updateState"));
-        assertFalse(joined.contains("Studios.put"));
+    private static FabricClientCommandSource source(List<String> feedback) {
+        return (FabricClientCommandSource) java.lang.reflect.Proxy.newProxyInstance(
+            FabricClientCommandSource.class.getClassLoader(), new Class<?>[] {FabricClientCommandSource.class},
+            (proxy, method, args) -> {
+                if (method.getName().equals("sendFeedback")) {
+                    feedback.add(((Component) args[0]).getString());
+                    return null;
+                }
+                throw new AssertionError("Unexpected command source call: " + method.getName());
+            });
+    }
+
+    private final class Harness {
+        final ForemanState state = ForemanStates.showcase();
+        final List<PublicStudioState> states = new ArrayList<>();
+        final List<PublicEvent> events = new ArrayList<>();
+        final PublishScheduler scheduler;
+
+        Harness(int rate) { this(rate, () -> PublicPolicy.DEFAULT); }
+
+        Harness(int rate, java.util.function.Supplier<PublicPolicy> policy) {
+            scheduler = new PublishScheduler(() -> state, policy, () -> rate, () -> PLAYER, () -> STUDIO, () -> 4,
+                new PublishScheduler.Out() {
+                    @Override public void state(PublicStudioState state) { states.add(state); }
+                    @Override public void event(PublicEvent event) { events.add(event); }
+                });
+        }
+
+        void patch(String agentState) {
+            var set = new com.google.gson.JsonObject();
+            set.addProperty("state", agentState);
+            state.patch("agent", "marlow", set);
+        }
     }
 }

@@ -4,12 +4,13 @@ import dev.agentcraft.client.foreman.ForemanState;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
 import dev.agentcraft.mp.MpReasons;
-import dev.agentcraft.mp.RateBucket;
 import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicJson;
 import dev.agentcraft.mp.state.PublicPolicy;
 import dev.agentcraft.mp.state.PublicStudioState;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.IntSupplier;
@@ -17,7 +18,7 @@ import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Coalesces public state to the server rate and drops events past that rate.
+ * Coalesces public state to the client send rate and drops events past that rate.
  * Call it on the client thread only. "Unchanged" compares content with {@code rev} still 0.
  */
 public final class PublishScheduler {
@@ -36,9 +37,10 @@ public final class PublishScheduler {
     private boolean dirty;
     private int rev;
     private @Nullable PublicStudioState last;
-    private @Nullable RateBucket stateBucket;
-    private @Nullable RateBucket eventBucket;
-    private int rate;
+    private final SendWindow stateWindow = new SendWindow();
+    private final SendWindow eventWindow = new SendWindow();
+    private final Deque<PublicEvent> heldEvents = new ArrayDeque<>();
+    private int rate = -1;
     private boolean loggedUnchanged;
     private boolean loggedStateRate;
     private boolean loggedEventRate;
@@ -62,9 +64,10 @@ public final class PublishScheduler {
         rev = 0;
         last = null;
         dirty = true;
-        stateBucket = null;
-        eventBucket = null;
-        rate = 0;
+        stateWindow.clear();
+        eventWindow.clear();
+        heldEvents.clear();
+        rate = -1;
         loggedUnchanged = false;
         loggedStateRate = false;
         loggedEventRate = false;
@@ -77,54 +80,65 @@ public final class PublishScheduler {
             skipOnceNotMultiplayer();
             return;
         }
-        loggedNotMultiplayer = false;
         int perSecond = ratePerSecond.getAsInt();
+        prepareRate(perSecond);
         if (perSecond < 1) {
             skipOnceNotMultiplayer();
             return;
         }
-        if (!eventBucket(perSecond).tryTake(nowNanos)) {
-            if (!loggedEventRate) {
-                skipped(MpReasons.RATE_LIMITED);
-                loggedEventRate = true;
-            }
+        loggedNotMultiplayer = false;
+        if (dirty) flush(nowNanos, true);
+        if (dirty) {
+            hold(event, perSecond);
             return;
         }
-        loggedEventRate = false;
-        out.event(event);
+        drainHeld(nowNanos);
+        if (!heldEvents.isEmpty()) {
+            hold(event, perSecond);
+            return;
+        }
+        sendEvent(event, perSecond, nowNanos);
     }
 
     public void flush(long nowNanos, boolean multiplayer) {
-        if (!dirty) return;
         if (!multiplayer) {
-            skipOnceNotMultiplayer();
+            if (dirty || !heldEvents.isEmpty()) skipOnceNotMultiplayer();
+            return;
+        }
+        int perSecond = ratePerSecond.getAsInt();
+        prepareRate(perSecond);
+        if (perSecond < 1) {
+            if (dirty || !heldEvents.isEmpty()) skipOnceNotMultiplayer();
             return;
         }
         loggedNotMultiplayer = false;
-        ForemanState state = states.get();
-        if (state == null) return;
-        PublicStudioState projected = Redactor.redact(state, policy.get());
-        if (projected.equals(last)) {
-            dirty = false;
-            if (!loggedUnchanged) {
-                skipped(MpReasons.UNCHANGED);
-                loggedUnchanged = true;
+        if (dirty) {
+            ForemanState state = states.get();
+            if (state != null) {
+                PublicStudioState projected = Redactor.redact(state, policy.get());
+                if (projected.equals(last)) {
+                    dirty = false;
+                    if (!loggedUnchanged) {
+                        skipped(MpReasons.UNCHANGED);
+                        loggedUnchanged = true;
+                    }
+                } else {
+                    loggedUnchanged = false;
+                    if (!stateWindow.tryTake(perSecond, nowNanos)) {
+                        if (!loggedStateRate) {
+                            skipped(MpReasons.RATE_LIMITED);
+                            loggedStateRate = true;
+                        }
+                    } else {
+                        sendState(projected);
+                    }
+                }
             }
-            return;
         }
-        loggedUnchanged = false;
-        int perSecond = ratePerSecond.getAsInt();
-        if (perSecond < 1) {
-            skipOnceNotMultiplayer();
-            return;
-        }
-        if (!stateBucket(perSecond).tryTake(nowNanos)) {
-            if (!loggedStateRate) {
-                skipped(MpReasons.RATE_LIMITED);
-                loggedStateRate = true;
-            }
-            return;
-        }
+        if (!dirty) drainHeld(nowNanos);
+    }
+
+    private void sendState(PublicStudioState projected) {
         if (rev == Integer.MAX_VALUE) rev = 0;
         PublicStudioState stamped = new PublicStudioState(rev + 1, projected.foremanOnline(), projected.agents(),
             projected.counts(), projected.goal(), projected.ci(), projected.policy(), projected.tasks());
@@ -140,6 +154,46 @@ public final class PublishScheduler {
             "policy", PolicyStore.bits(stamped.policy()));
     }
 
+    private void sendEvent(PublicEvent event, int perSecond, long nowNanos) {
+        if (!eventWindow.tryTake(perSecond, nowNanos)) {
+            logEventRate();
+            return;
+        }
+        loggedEventRate = false;
+        out.event(underCurrentPolicy(event));
+    }
+
+    /**
+     * A held say can be older than the policy. Its text leaves the machine only while {@code sayText}
+     * is on at the moment it is sent; otherwise the text is cleared and the length kept.
+     */
+    private PublicEvent underCurrentPolicy(PublicEvent event) {
+        if (event instanceof PublicEvent.Say say && say.text() != null && !policy.get().sayText()) {
+            return new PublicEvent.Say(say.agentId(), say.to(), null, say.length());
+        }
+        return event;
+    }
+
+    private void hold(PublicEvent event, int perSecond) {
+        if (heldEvents.size() < perSecond) {
+            heldEvents.addLast(event);
+            return;
+        }
+        logEventRate();
+    }
+
+    private void drainHeld(long nowNanos) {
+        int perSecond = ratePerSecond.getAsInt();
+        if (perSecond < 1) return;
+        while (!heldEvents.isEmpty()) sendEvent(heldEvents.removeFirst(), perSecond, nowNanos);
+    }
+
+    private void logEventRate() {
+        if (loggedEventRate) return;
+        skipped(MpReasons.RATE_LIMITED);
+        loggedEventRate = true;
+    }
+
     private void skipOnceNotMultiplayer() {
         if (loggedNotMultiplayer) return;
         skipped(MpReasons.NOT_MULTIPLAYER);
@@ -151,21 +205,18 @@ public final class PublishScheduler {
             "player", player.get(), "studio", studio.get(), "plot", plot.getAsInt(), "rev", rev, "reason", reason);
     }
 
-    private void buckets(int perSecond) {
-        if (stateBucket == null || rate != perSecond) {
+    private void prepareRate(int perSecond) {
+        perSecond = Math.max(0, perSecond);
+        if (rate != perSecond) {
             rate = perSecond;
-            stateBucket = new RateBucket(perSecond);
-            eventBucket = new RateBucket(perSecond);
+            stateWindow.clear();
+            eventWindow.clear();
+            while (heldEvents.size() > perSecond) {
+                heldEvents.removeLast();
+                logEventRate();
+            }
         }
     }
 
-    private RateBucket stateBucket(int perSecond) {
-        buckets(perSecond);
-        return stateBucket;
-    }
-
-    private RateBucket eventBucket(int perSecond) {
-        buckets(perSecond);
-        return eventBucket;
-    }
+    public boolean isDirty() { return dirty; }
 }
