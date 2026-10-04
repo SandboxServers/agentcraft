@@ -12,10 +12,13 @@ import dev.agentcraft.client.foreman.Protocol.Decision;
 import dev.agentcraft.client.foreman.Protocol.DecisionKind;
 import dev.agentcraft.client.foreman.Protocol.LogEntry;
 import dev.agentcraft.client.foreman.Protocol.Task;
+import dev.agentcraft.client.mp.StudioView;
+import dev.agentcraft.client.mp.visitor.VisitorGate;
 import dev.agentcraft.client.ui.Kit;
 import dev.agentcraft.client.ui.Panels;
 import dev.agentcraft.client.ui.TextUtil;
 import dev.agentcraft.client.ui.UiStyle;
+import dev.agentcraft.mp.state.PublicAgent;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -71,6 +74,9 @@ public final class AgentCardScreen extends Screen {
 	}
 
 	private final String agentId;
+	/** Non-null in visitor mode: the remote studio and public agent the read-only card shows. */
+	private final @Nullable StudioView visitorStudio;
+	private final @Nullable PublicAgent visitorAgent;
 	private int x0;
 	private int y0;
 	private int h;
@@ -120,13 +126,35 @@ public final class AgentCardScreen extends Screen {
 	}
 
 	public AgentCardScreen(String agentId) {
+		this(agentId, null, null);
+	}
+
+	/**
+	 * Read-only card for an agent in someone else's studio (MP-11). It draws only
+	 * {@link PublicAgent} fields and never reads {@code Foreman.state()}; the message box and the
+	 * pause/stop/resume actions are absent, so it cannot reach the viewer's own Foreman.
+	 */
+	public AgentCardScreen(StudioView studio, PublicAgent agent) {
+		this(agent.id(), studio, agent);
+	}
+
+	private AgentCardScreen(String agentId, @Nullable StudioView studio, @Nullable PublicAgent agent) {
 		super(Component.literal("Agent"));
 		this.agentId = agentId;
-		lastAgent = agentId;
+		this.visitorStudio = studio;
+		this.visitorAgent = agent;
+		if (studio == null) {
+			lastAgent = agentId;
+		}
 	}
 
 	public String agentId() {
 		return agentId;
+	}
+
+	/** True when this is the read-only remote card (MP-11), not the viewer's own card. */
+	public boolean visitorMode() {
+		return visitorAgent != null;
 	}
 
 	/** The message line's text, or null when it is closed (QA). */
@@ -154,11 +182,19 @@ public final class AgentCardScreen extends Screen {
 
 	@Override
 	protected void init() {
+		if (visitorMode()) {
+			layoutVisitor();
+			return;
+		}
 		layout();
 	}
 
 	@Override
 	protected void repositionElements() {
+		if (visitorMode()) {
+			layoutVisitor();
+			return;
+		}
 		// window resize: keep the message line (and what was typed), just lay the card out again
 		layout();
 	}
@@ -291,6 +327,10 @@ public final class AgentCardScreen extends Screen {
 
 	@Override
 	public void extractRenderState(GuiGraphicsExtractor g, int mouseX, int mouseY, float a) {
+		if (visitorMode()) {
+			drawVisitor(g);
+			return;
+		}
 		Agent ag = agent();
 		AgentView v = view();
 		ForemanState st = Foreman.state();
@@ -453,6 +493,54 @@ public final class AgentCardScreen extends Screen {
 			}
 			hint(g, font, hx, y, right, "Esc", "close");
 		}
+	}
+
+	/** The read-only remote card: public state only, no actions, no Foreman reads. */
+	private void drawVisitor(GuiGraphicsExtractor g) {
+		StudioView studio = visitorStudio;
+		PublicAgent ag = visitorAgent;
+		if (studio == null || ag == null) {
+			onClose();
+			return;
+		}
+		layoutVisitor();
+		Panels.panel(g, x0, y0, W, h);
+		Kit.Padding pp = Kit.padding("panel_paper");
+		int ix = x0 + pp.left();
+		int iw = W - pp.left() - pp.right();
+		int y = y0 + pp.top();
+		int ink = UiStyle.color("paper.text");
+		int muted = UiStyle.color("paper.muted");
+
+		// owner + online, so a visitor knows whose agent this is
+		Panels.text(g, font, TextUtil.ellipsize(font, studio.ownerName(), iw - 60), ix, y + 1, muted);
+		String online = studio.online() ? "online" : "offline";
+		Panels.text(g, font, online, ix + iw - font.width(online), y + 1, muted);
+		y += 14;
+		Panels.text(g, font, ag.name(), ix, y, UiStyle.agentOnLight(ag.id()));
+		y += 14;
+		Panels.divider(g, ix, y, iw);
+		y += 6;
+
+		for (String line : VisitorGate.agentLines(ag, studio.ownerName())) {
+			Panels.text(g, font, TextUtil.ellipsize(font, line, iw), ix, y, ink);
+			y += ROW;
+		}
+
+		int fy = y0 + h - pp.bottom() - 6;
+		Panels.text(g, font, "Read-only visitor view", ix, fy, muted);
+		String esc = "Esc close";
+		Panels.text(g, font, esc, ix + iw - font.width(esc), fy, muted);
+	}
+
+	private void layoutVisitor() {
+		Kit.Padding pp = Kit.padding("panel_paper");
+		int lines = visitorAgent == null || visitorStudio == null
+			? 1
+			: Math.max(1, VisitorGate.agentLines(visitorAgent, visitorStudio.ownerName()).size());
+		h = pp.top() + 14 + 14 + 6 + lines * ROW + 12 + 12 + pp.bottom();
+		x0 = (this.width - W) / 2;
+		y0 = Math.max(4, (this.height - h) / 2);
 	}
 
 	/** The "waits on you" block: kind, ids, the question, one context line, then the review button or the option rows. */
@@ -761,6 +849,12 @@ public final class AgentCardScreen extends Screen {
 
 	@Override
 	public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+		if (visitorMode()) {
+			if (event.button() == 0 && (event.x() < x0 || event.x() > x0 + W || event.y() < y0 || event.y() > y0 + h)) {
+				onClose();
+			}
+			return true;
+		}
 		if (event.button() == 0) {
 			for (Btn b : buttons) {
 				if (b.hit(event.x(), event.y())) {
@@ -788,6 +882,13 @@ public final class AgentCardScreen extends Screen {
 
 	@Override
 	public boolean keyPressed(KeyEvent event) {
+		if (visitorMode()) {
+			// only Esc: M, P, R and 1-4 must not reach the Foreman
+			if (event.isEscape()) {
+				onClose();
+			}
+			return true;
+		}
 		if (field != null) {
 			if (event.isEscape()) {
 				closeField();
@@ -830,7 +931,7 @@ public final class AgentCardScreen extends Screen {
 
 	@Override
 	public boolean charTyped(CharacterEvent event) {
-		if (field == null) {
+		if (visitorMode() || field == null) {
 			return false;
 		}
 		int cp = event.codepoint();
