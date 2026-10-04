@@ -48,7 +48,7 @@ Regression fixtures were added before the parser fix and failed on the `ℹ` cas
 
 ## Initial verification (3b581ab)
 
-All logs below are gitignored under `artifacts/logs/`. Commands are from the worktree root unless stated.
+All logs below are gitignored under `artifacts/logs/`. Commands are from the worktree root unless stated. `gw` is the swarm machine's wrapper around `./gradlew` (one build at a time).
 
 | Command/check | Result | Log |
 |---|---|---|
