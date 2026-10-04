@@ -25,6 +25,7 @@ public final class MpEvents {
     public static final String PUBLIC_STATE_SKIPPED = "public_state_skipped";
     public static final String POLICY_CHANGED = "policy_changed";
     public static final String PUBLIC_STATE_REJECTED = "public_state_rejected";
+    public static final String STUDIO_EVENT_REJECTED = "studio_event_rejected";
     public static final String RELAY_SENT = "relay_sent";
     public static final String PRESENCE = "presence";
     public static final String REMOTE_STUDIO_ADDED = "remote_studio_added";
@@ -57,6 +58,7 @@ public final class MpEvents {
         Map.entry(PUBLIC_STATE_SKIPPED, "debug"),
         Map.entry(POLICY_CHANGED, "info"),
         Map.entry(PUBLIC_STATE_REJECTED, "warn"),
+        Map.entry(STUDIO_EVENT_REJECTED, "warn"),
         Map.entry(RELAY_SENT, "debug"),
         Map.entry(PRESENCE, "info"),
         Map.entry(REMOTE_STUDIO_ADDED, "info"),

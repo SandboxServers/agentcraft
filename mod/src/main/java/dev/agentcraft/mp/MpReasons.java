@@ -3,6 +3,10 @@ package dev.agentcraft.mp;
 public final class MpReasons {
     private MpReasons() {}
     public static final String QUICKPLAY_MULTIPLAYER = "quickplay_multiplayer";
+    public static final String MULTIPLAYER_SCREEN = "multiplayer_screen";
+    public static final String BAD_ORIGIN = "bad_origin";
+    public static final String BUILD_ERROR = "build_error";
+    public static final String UNKNOWN_AGENT = "unknown_agent";
     public static final String DISABLED = "disabled";
     public static final String GRID_FULL = "grid_full";
     public static final String IO_ERROR = "io_error";

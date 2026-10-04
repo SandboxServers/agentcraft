@@ -105,4 +105,16 @@ class FoundationTest {
             }
         }
     }
+    @Test void wave_one_reason_names_and_studio_event_catalog_entry_are_fixed() {
+        assertEquals("multiplayer_screen",MpReasons.MULTIPLAYER_SCREEN);
+        assertEquals("bad_origin",MpReasons.BAD_ORIGIN);
+        assertEquals("build_error",MpReasons.BUILD_ERROR);
+        assertEquals("unknown_agent",MpReasons.UNKNOWN_AGENT);
+        assertEquals("studio_event_rejected",MpEvents.STUDIO_EVENT_REJECTED);
+        assertEquals("warn",MpEvents.CATALOG.get(MpEvents.STUDIO_EVENT_REJECTED));
+        try(var capture=MpLog.capture()) {
+            MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,"reason",MpReasons.UNKNOWN_AGENT);
+            assertEquals(List.of("event=studio_event_rejected reason=unknown_agent"),capture.lines());
+        }
+    }
 }
