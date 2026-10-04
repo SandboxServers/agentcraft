@@ -5,6 +5,7 @@ import org.jspecify.annotations.Nullable;
 
 public record WorldIntent(int rev, Map<String, LampStatusWire> lamps, boolean podiumOpen, boolean mergeActive, Set<String> litMonitors) {
     public WorldIntent {
+        MpText.cap("lamps",lamps.keySet(),64); MpText.cap("litMonitors",litMonitors,64);
         if(lamps.keySet().stream().anyMatch(key->!isBinding(key))) throw new IllegalArgumentException("invalid binding");
         if(litMonitors.stream().anyMatch(id->!isAgentId(id))) throw new IllegalArgumentException("invalid monitor");
         lamps = Map.copyOf(lamps); litMonitors = Set.copyOf(litMonitors);
