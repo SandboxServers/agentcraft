@@ -50,4 +50,13 @@ class AnchorsTest {
             Anchors.remove(StudioId.LOCAL); Anchors.setSelf(StudioId.LOCAL); assertEquals(2,calls[0]);
         } finally { active[0]=false; Anchors.publish(Anchors.Layout.EMPTY); }
     }
+    @Test void public_json_layout_format_round_trips_with_and_without_bounds() {
+        var builder=Anchors.builder("persisted").put("desk",128.5,66,-127.5,90,30);
+        var unbounded=builder.build();
+        var bounded=builder.bounds(82,60,-164,174,100,-74).build();
+        for(var layout:List.of(unbounded,bounded)) {
+            var snapshot=new Anchors.Layout(layout.name(),7,layout.bounds(),layout.anchors());
+            assertEquals(snapshot,Anchors.fromJson(Anchors.toJson(snapshot)));
+        }
+    }
 }

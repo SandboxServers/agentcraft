@@ -229,7 +229,7 @@ public final class Anchors {
 		return Math.round(v * 1000.0) / 1000.0;
 	}
 
-	static Layout fromJson(JsonObject root) {
+	public static Layout fromJson(JsonObject root) {
 		Map<String, Anchor> map = new LinkedHashMap<>();
 		JsonObject anchors = root.has("anchors") ? root.getAsJsonObject("anchors") : new JsonObject();
 		for (var e : anchors.entrySet()) {
