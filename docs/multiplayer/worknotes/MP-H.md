@@ -109,6 +109,16 @@ For each fresh state, confirm `ok/ready=true`, player `MP92_A` / `MP92_B`, a loa
 
 On Windows, also verify a two-client cycle with inherited `JAVA_HOME` / `GRADLE_USER_HOME`, paths containing spaces, Ctrl+Break/forced cleanup via the existing helpers, and server world persistence after stopping. Windows dedicated-server cleanup can require the force fallback because the existing background helper has no server stdin; clean-save behavior is not live-verified.
 
+## Coordinator live verification: results
+
+Run by the coordinator on 2026-10-03, outside the worker's sandbox, with the commands of the section above.
+
+- One-client cycle: `up --slot 92 --clients 1` is ready in about 10 s; DevBridge `state` answers; `down`, a second `down` and `status` succeed; no process is left.
+- Two-client cycle, run on its own: `up --clients 2` is ready in about 15 s; `state` answers on both clients; `down`, a second `down` and `status` succeed; no process is left.
+- Memory with two clients up: the server about 0.7 GB resident, each client about 1.1 GB, each sim Foreman about 0.1 GB, about 3.2 GB in total.
+- Failed: a two-client `up` started in the same second as the previous `down`. Client A logged `DevBridge server error (port 8084): java.net.BindException: Address already in use`, both clients still joined, and `up` waited out its 240 s timeout and exited 1. `down` then cleaned up. This is a review finding; the fix is pending.
+- Seen: the client rejects the seeded `simulationDistance:4` (`Value 4 outside of range [5:33]`).
+
 ## Deviations and open risks
 
 - **Live blocked:** macOS sandbox denies process inspection. One-client up was attempted and failed before launch; two-client up was intentionally not attempted after that blocker. No observed claim of either remote connection or a clean live shutdown is made.
