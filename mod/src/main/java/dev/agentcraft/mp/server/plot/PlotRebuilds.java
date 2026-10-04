@@ -6,8 +6,9 @@ import java.util.UUID;
 
 /**
  * Per-player rebuild throttle. Server thread only. A non-operator may rebuild once every
- * {@link #WINDOW_TICKS} server ticks, counted from the last accepted rebuild. Operators are not
- * recorded and not limited. Cleared on server stop.
+ * {@link #WINDOW_TICKS} server ticks, counted from the last accepted rebuild: one that passed the
+ * check and whose build succeeded. A build that threw is not recorded. Operators are not recorded
+ * and not limited. Cleared on server stop.
  */
 public final class PlotRebuilds {
     /** 60 seconds at 20 ticks per second. */

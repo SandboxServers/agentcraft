@@ -267,8 +267,8 @@ class PlotRegistryTest {
         Files.createDirectories(file.getParent());
         Files.writeString(file, "{\"plots\":["
             + "{\"index\":0,\"owner\":\"" + a + "\",\"x\":0,\"y\":0,\"z\":0},"
-            + "{\"index\":1,\"owner\":\"" + a + "\",\"x\":16,\"y\":0,\"z\":0},"
-            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":16,\"y\":0,\"z\":0}]}");
+            + "{\"index\":1,\"owner\":\"" + a + "\",\"x\":128,\"y\":0,\"z\":0},"
+            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":128,\"y\":0,\"z\":0}]}");
         PlotStore.Loaded loaded = PlotStore.load(dir);
         assertFalse(loaded.failed());
         assertEquals(2, loaded.plots().size());
@@ -276,6 +276,40 @@ class PlotRegistryTest {
         assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 1 && plot.owner().equals(StudioId.of(b))),
             "the valid third row is accepted after the second is rejected for its owner");
         assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 0 && plot.owner().equals(StudioId.of(a))));
+    }
+
+    @Test
+    void a_stored_origin_that_overlaps_an_accepted_row_is_skipped(@TempDir Path dir) throws Exception {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        UUID c = UUID.randomUUID();
+        String first = "{\"index\":0,\"owner\":\"" + a + "\",\"x\":0,\"y\":0,\"z\":0}";
+        // A distinct index and a distinct owner, 16 blocks from the first origin: the same ground.
+        String overlapping = "{\"index\":1,\"owner\":\"" + b + "\",\"x\":16,\"y\":0,\"z\":0}";
+        Path file = PlotStore.plotsFile(dir);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "{\"plots\":[" + first + "," + overlapping + "]}");
+        PlotStore.Loaded two = PlotStore.load(dir);
+        assertFalse(two.failed());
+        assertEquals(1, two.skipped());
+        assertEquals(List.of(new Plot(0, StudioId.of(a), BlockPos.ZERO)), two.plots(), "the first row wins");
+
+        // The skipped row reserves neither its index nor its owner, and a neighbour at the normal
+        // stride still loads.
+        Files.writeString(file, "{\"plots\":[" + first + "," + overlapping + ","
+            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":128,\"y\":0,\"z\":0},"
+            + "{\"index\":2,\"owner\":\"" + c + "\",\"x\":128,\"y\":0,\"z\":128}]}");
+        PlotStore.Loaded four = PlotStore.load(dir);
+        assertFalse(four.failed());
+        assertEquals(1, four.skipped());
+        assertEquals(List.of(
+            new Plot(0, StudioId.of(a), BlockPos.ZERO),
+            new Plot(1, StudioId.of(b), PlotGrid.originOf(1, 128)),
+            new Plot(2, StudioId.of(c), PlotGrid.originOf(2, 128))), four.plots());
+        PlotRegistry registry = new PlotRegistry();
+        registry.replaceAll(four.plots());
+        assertEquals(StudioId.of(a), registry.plotAt(new BlockPos(16, 64, 0)).orElseThrow().owner());
+        assertEquals(PlotGrid.originOf(1, 128), registry.plotOf(StudioId.of(b)).orElseThrow().origin());
     }
 
     private static PlotStore.Loaded loadOne(Path dir, int x, int z) throws Exception {

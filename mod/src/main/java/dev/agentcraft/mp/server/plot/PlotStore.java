@@ -26,6 +26,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.AABB;
 
 /**
  * World-folder persistence for the plot registry. {@code agentcraft/plots.json} is the source of
@@ -81,19 +82,25 @@ public final class PlotStore {
             JsonElement plots = root.getAsJsonObject().get("plots");
             if (plots == null || !plots.isJsonArray()) return new Loaded(List.of(), true, 0);
             List<Plot> loaded = new ArrayList<>();
+            List<AABB> boxes = new ArrayList<>();
             Set<Integer> indexes = new HashSet<>();
             Set<UUID> owners = new HashSet<>();
             int skipped = 0;
             for (JsonElement element : plots.getAsJsonArray()) {
                 Plot plot = plotFrom(element);
-                // Both sets are consulted before either is touched: a rejected row must not reserve
-                // its index or owner and reject the valid rows that follow it.
-                if (plot == null || indexes.contains(plot.index()) || owners.contains(plot.owner().owner())) {
+                AABB box = plot == null ? null : plot.box();
+                // Every check runs before anything is recorded: a rejected row must not reserve its
+                // index, owner or ground and reject the valid rows that follow it. Two stored origins
+                // on the same ground would let two owners rebuild the same blocks, so the first row
+                // wins there too, with the same box test an allocation uses.
+                if (plot == null || indexes.contains(plot.index()) || owners.contains(plot.owner().owner())
+                    || overlaps(boxes, box)) {
                     skipped++;
                     continue;
                 }
                 indexes.add(plot.index());
                 owners.add(plot.owner().owner());
+                boxes.add(box);
                 loaded.add(plot);
             }
             if (skipped > 0) AgentCraft.LOGGER.warn("Skipped {} invalid plot records", skipped);
@@ -193,6 +200,13 @@ public final class PlotStore {
         StudioId studio = StudioId.of(uuid);
         if (studio.equals(StudioId.LOCAL)) return null;
         return new Plot(index.getAsInt(), studio, new BlockPos(x.getAsInt(), y.getAsInt(), z.getAsInt()));
+    }
+
+    private static boolean overlaps(List<AABB> boxes, AABB box) {
+        for (AABB old : boxes) {
+            if (old.intersects(box)) return true;
+        }
+        return false;
     }
 
     private static OptionalInt integer(JsonElement element) {
