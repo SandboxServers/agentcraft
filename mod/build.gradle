@@ -47,7 +47,6 @@ fabricApi {
 		modId = "agentcraft-gametest"
 		enableGameTests = true
 		enableClientGameTests = false
-		eula = true
 	}
 }
 
