@@ -8,7 +8,7 @@
 - **Packet:** MP-F, Foundation; packet number 0.
 - **Base:** `main` @ `b40768d`; branch `mp/MP-F-foundation`.
 - **Machine:** macOS Apple Silicon, Java 25, Node 24.18.0.
-- **Status:** UATPending: implementation and singleplayer/dev checks pass; the live dedicated hello remains unverified because its client could not initialize SDL.
+- **Status:** Review. The implementation, the singleplayer QA compare and the live dedicated hello are verified (see "Coordinator verification"). The worker's own live hello attempt below failed in its sandbox; review fixes are pending.
 - No contract fields, defaults, ownership boundaries, or existing caller signatures were changed. No push, PR, colo access, or memory update.
 
 ## What shipped
@@ -66,6 +66,15 @@ All Gradle builds used `gw build` from this worktree's `mod/`. `gw` and `game` a
 | Process cleanup | All exact owned client/Foreman/server JVMs exited. Server accepted `stop` on stdin; no game/server remains. | Targeted `ps` checks; shutdown log; the packet did not stop shared Gradle daemons |
 
 **Usable singleplayer QA baseline run id: `MP-F-baseline-20261003-direct`.** The initial run has no screenshots and must not be used as the baseline. No `hello_sent`, `hello_received` or `mode_changed` was observed in the singleplayer log.
+
+## Coordinator verification
+
+Run by the coordinator on 2026-10-03, outside the worker's sandbox, on the same machine.
+
+- `gw build`: green, 18 JUnit tests, no failures.
+- Singleplayer QA with the ordinary launcher, run id `MP-F-baseline-coordinator`: 10 ok, 0 skipped, 0 failed. Compared shot by shot with a run on `main`: the same composition in all ten, mean luma within 0.8 on every shot, PNGs read. The first run in a freshly created world can show a blank goal hologram in `qa02_entrance_atrium`; a second run shows it, on `main` as well.
+- Live dedicated hello (`game node artifacts/mp-f/check-hello.mjs`, server config `enabled: true`, one dev client): the server logs `hello_sent` and `hello_received`, the client logs `hello_received`, `hello_sent` and `mode_changed from=SINGLEPLAYER to=MULTIPLAYER`, and `dev.mp.studios` reports `MULTIPLAYER` with the own studio in slot 0.
+- Seen in the same run: on disconnect the client logs `mode_changed` from the Netty IO thread, so the disconnect reset does not run on the client thread. This is a review finding; the fix is pending.
 
 ## Deviations and remaining verification
 
