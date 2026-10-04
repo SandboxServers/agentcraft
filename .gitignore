@@ -19,3 +19,4 @@ mod/build/
 # Local Claude Code state stays private; the shared agent cast is committed.
 .claude/*
 !.claude/agents/
+!.claude/settings.json

@@ -1,7 +1,7 @@
 # Multiplayer AgentCraft
 
 > Type: how-to. Audience: the Claude Code coordinator, packet workers and the owner.
-> Updated: 2026-10-03 (MP-00: spike done, campaign planned). Companions: [audit](audit.md), [work packets](work-packets.md), [session resume](handoffs/session-resume.md), [deploy runbook](deploy.md), [MP-00 worknote](worknotes/MP-00.md), [original handoff](handoff-2026-10-03.md).
+> Updated: 2026-10-04 (Wave 1 written and reviewed; see the session resume). Companions: [audit](audit.md), [work packets](work-packets.md), [session resume](handoffs/session-resume.md), [deploy runbook](deploy.md), [MP-00 worknote](worknotes/MP-00.md), [original handoff](handoff-2026-10-03.md).
 
 ## Purpose
 
@@ -53,6 +53,20 @@ Proposed defaults are what the campaign builds against. The owner can change any
 2. Confirm D-MP05: should visitors be able to build anywhere, or only outside plots?
 3. Who is on the first whitelist? The colo already runs today's server (as a preview; remote players' agents don't render correctly until the campaign lands, A-13). Players also need the edge to forward TCP 25565 (A-53).
 4. Should the cast's `upstream-sync-steward` open a conversation with upstream about contributing multiplayer later (D-MP04)?
+5. The harness's live up/down cycle on Windows was run on 2026-10-04 (`worknotes/MP-H.md`). Who runs the one `down` on macOS that #4 still owes?
+
+## Owner rulings from the pull-request review (2026-10-04)
+
+Given by the owner's reviewer on #5, in answer to the questions the review left open:
+
+- **Plot stride.** A server refuses to start when `plotStride` no longer matches its stored plots. No wire change (a plot's origin is not sent).
+- **Plot protection (MP-13, #18), under D-MP05.** Approved as built: with an empty hand a visitor may use only doors, trapdoors, fence gates, buttons and levers inside a plot; protection covers the plot plus a margin of one block; the whole column above a plot is protected; non-player entities in a plot are protected; structures completed from outside that need blocks the owner placed across the edge (a nether portal, a golem pattern) are left open. **Pistons pushing in from outside stay a tracked follow-up** (it needs a mixin the packet was not allowed); so do the other known limits in its worknote (fluids and fire from outside, projectiles, trampling).
+- **Telemetry catalog.** A refused `plot_command` carries no `reason`. `studio_event_rejected` gains the reason `bad_version`. Both are now in work-packets.md.
+- **Typed telemetry values in `MpLog`.** Deferred until after Wave 1; not blocking.
+- **Singleplayer and MP-07 (#12).** Singleplayer stays unchanged: the wire filter (no `ci:<repoId>` key, eight CI slots, wire-legal agent ids, the 64 caps) applies only to what is sent to a server. The `ci:<repoId>` lamp binding is a documented feature.
+- **`/agentcraft` open to every player, and no cap on plots.** Fine for now behind the whitelist. **Every new subcommand must carry its own permission check.**
+- **Remote DevBridge commands** stay behind `AGENTCRAFT_DEV_REMOTE=1`, which the harness sets for the clients it launches (#4).
+- **Diffs for Wave 1 reviews** are taken from `3d6a58f`.
 
 ## Packet status
 
@@ -63,21 +77,21 @@ Proposed defaults are what the campaign builds against. The owner can change any
 | MP-T Game tests | Review | 0 | #1 | [MP-T](worknotes/MP-T.md) |
 | MP-B Baseline (Node ≥ 22.18) | Review | 0 | #2 | [MP-B](worknotes/MP-B.md) |
 | MP-H Two-client harness | Review | 0 | #4 | [MP-H](worknotes/MP-H.md) |
-| MP-01 Server mode and world rules | Ready | 1 | | |
-| MP-02 Build at an offset | Ready | 1 | | |
-| MP-03 Plots: registry, lifecycle, commands | Ready | 1 | | |
-| MP-04 Layout sync | Ready | 1 | | |
-| MP-05 Public-state publisher and redaction | Ready | 1 | | |
-| MP-06 Relay and presence | Ready | 1 | | |
-| MP-07 World intents | Ready | 1 | | |
-| MP-08 Multi-studio agents | Ready | 1 | | |
-| MP-09 Studio-aware displays | Ready | 1 | | |
-| MP-10 Studio-aware stations | Ready | 1 | | |
-| MP-11 Visitor interactions | Ready | 1 | | |
-| MP-12 DevBridge in multiplayer | Ready | 1 | | |
-| MP-13 Plot protection | Ready | 1 | | |
-| MP-14 Deployment for multiplayer | Ready; the release pipeline is already done | 1 | | |
-| MP-I Integration | BlockedDependency (Wave 1) | 2 | | |
+| MP-01 Server mode and world rules | Review (reviewed and verified, in `mp/integration`) | 1 | #6 | on the branch `mp/MP-01-server-mode` |
+| MP-02 Build at an offset | Review (reviewed and verified, in `mp/integration`) | 1 | #7 | on the branch `mp/MP-02-offset-build` |
+| MP-03 Plots: registry, lifecycle, commands | Review (reviewed and verified, in `mp/integration`) | 1 | #8 | on the branch `mp/MP-03-plots` |
+| MP-04 Layout sync | Review (reviewed and verified, in `mp/integration`) | 1 | #9 | on the branch `mp/MP-04-layout-sync` |
+| MP-05 Public-state publisher and redaction | Review (reviewed and verified, in `mp/integration`) | 1 | #10 | on the branch `mp/MP-05-publisher` |
+| MP-06 Relay and presence | Review (reviewed and verified, in `mp/integration`) | 1 | #11 | on the branch `mp/MP-06-relay` |
+| MP-07 World intents | Review (reviewed and verified, in `mp/integration`) | 1 | #12 | on the branch `mp/MP-07-world-intents` |
+| MP-08 Multi-studio agents | Review (reviewed and verified, in `mp/integration`) | 1 | #13 | on the branch `mp/MP-08-multi-studio-agents` |
+| MP-09 Studio-aware displays | Review (reviewed and verified, in `mp/integration`) | 1 | #14 | on the branch `mp/MP-09-displays` |
+| MP-10 Studio-aware stations | Review (reviewed and verified, in `mp/integration`) | 1 | #15 | on the branch `mp/MP-10-stations` |
+| MP-11 Visitor interactions | Review (reviewed and verified, in `mp/integration`) | 1 | #16 | on the branch `mp/MP-11-visitors` |
+| MP-12 DevBridge in multiplayer | Review (reviewed and verified, in `mp/integration`) | 1 | #17 | on the branch `mp/MP-12-dev-tools` |
+| MP-13 Plot protection | Review (reviewed and verified, in `mp/integration`) | 1 | #18 | on the branch `mp/MP-13-plot-protection` |
+| MP-14 Deployment for multiplayer | Review (reviewed and verified, in `mp/integration`) | 1 | #19 | on the branch `mp/MP-14-deploy` |
+| MP-I Integration | Not started (Wave 1 is on `mp/integration`; it starts when the owner says so) | 2 | | |
 | MP-Z Close-out, UAT, colo deploy | BlockedDependency (MP-I) | 3 | | |
 
 ## Parallelization plan
