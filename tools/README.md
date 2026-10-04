@@ -2,7 +2,7 @@
 
 ## macOS
 
-Requires Node 22+, git, and Java 25. Install Java with `brew install openjdk@25`;
+Requires Node 22.18+, git, and Java 25. Install Java with `brew install openjdk@25`;
 `mac.mjs` uses Homebrew's JDK directly, so no system Java changes are needed.
 
 ```sh
@@ -23,7 +23,7 @@ The screenshot QA command, `node tools/qa.mjs`, also uses this launcher on macOS
 
 ## Windows
 
-Windows PowerShell 5.1+ and Node 22. `launch.ps1` installs the npm dependencies it needs on the
+Windows PowerShell 5.1+ and Node 22.18+. `launch.ps1` installs the npm dependencies it needs on the
 first run (`npm ci` in `foreman/` and `tools/`); the Gradle wrapper downloads Gradle, Minecraft
 and Fabric by itself. Java 25 must be installed (Temurin 25: https://adoptium.net).
 
