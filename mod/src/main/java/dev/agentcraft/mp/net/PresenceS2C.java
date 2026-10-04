@@ -9,6 +9,7 @@ import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 
 public record PresenceS2C(StudioId studio, String ownerName, boolean online) implements CustomPacketPayload {
+    public PresenceS2C { MpText.cap("ownerName",ownerName,16); }
     public static final Type<PresenceS2C> TYPE = new Type<>(AgentCraft.id("presence_s2c"));
     public static final StreamCodec<RegistryFriendlyByteBuf,PresenceS2C> CODEC = MpCodecs.codec(
         (b,v)-> { b.writeUUID(v.studio().owner()); b.writeUtf(v.ownerName()); b.writeBoolean(v.online()); }, b->new PresenceS2C(MpCodecs.studio(b), MpCodecs.text(b,16), MpCodecs.bool(b)));
