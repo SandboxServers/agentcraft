@@ -4,6 +4,7 @@ import dev.agentcraft.client.foreman.ForemanState;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
 import dev.agentcraft.mp.MpReasons;
+import dev.agentcraft.mp.Plot;
 import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicJson;
 import dev.agentcraft.mp.state.PublicPolicy;
@@ -12,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
@@ -22,6 +24,13 @@ import org.jspecify.annotations.Nullable;
  * Call it on the client thread only. "Unchanged" compares content with {@code rev} still 0.
  */
 public final class PublishScheduler {
+    /**
+     * The server refuses a state without a reply (a studio that has no plot yet, for one), so the
+     * state that was sent is due again once no state has gone out for this long: a refused studio
+     * shows within 20 seconds, and an idle client sends three states a minute.
+     */
+    public static final long RESEND_NANOS = 20_000_000_000L;
+
     public interface Out {
         void state(PublicStudioState state);
         void event(PublicEvent event);
@@ -32,11 +41,13 @@ public final class PublishScheduler {
     private final IntSupplier ratePerSecond;
     private final Supplier<UUID> player;
     private final Supplier<UUID> studio;
-    private final IntSupplier plot;
+    private final Supplier<Optional<Plot>> plot;
     private final Out out;
     private boolean dirty;
     private int rev;
     private @Nullable PublicStudioState last;
+    private long lastStateNanos;
+    private Optional<Plot> plotSeen = Optional.empty();
     private final SendWindow stateWindow = new SendWindow();
     private final SendWindow eventWindow = new SendWindow();
     private final Deque<PublicEvent> heldEvents = new ArrayDeque<>();
@@ -47,7 +58,7 @@ public final class PublishScheduler {
     private boolean loggedNotMultiplayer;
 
     public PublishScheduler(Supplier<ForemanState> states, Supplier<PublicPolicy> policy, IntSupplier ratePerSecond,
-            Supplier<UUID> player, Supplier<UUID> studio, IntSupplier plot, Out out) {
+            Supplier<UUID> player, Supplier<UUID> studio, Supplier<Optional<Plot>> plot, Out out) {
         this.states = Objects.requireNonNull(states);
         this.policy = Objects.requireNonNull(policy);
         this.ratePerSecond = Objects.requireNonNull(ratePerSecond);
@@ -63,6 +74,7 @@ public final class PublishScheduler {
     public void reconnect() {
         rev = 0;
         last = null;
+        plotSeen = Optional.empty();
         dirty = true;
         stateWindow.clear();
         eventWindow.clear();
@@ -87,6 +99,7 @@ public final class PublishScheduler {
             return;
         }
         loggedNotMultiplayer = false;
+        resendIfDue(nowNanos);
         if (dirty) flush(nowNanos, true);
         if (dirty) {
             hold(event, perSecond);
@@ -112,6 +125,7 @@ public final class PublishScheduler {
             return;
         }
         loggedNotMultiplayer = false;
+        resendIfDue(nowNanos);
         if (dirty) {
             ForemanState state = states.get();
             if (state != null) {
@@ -130,7 +144,7 @@ public final class PublishScheduler {
                             loggedStateRate = true;
                         }
                     } else {
-                        sendState(projected);
+                        sendState(projected, nowNanos);
                     }
                 }
             }
@@ -138,17 +152,33 @@ public final class PublishScheduler {
         if (!dirty) drainHeld(nowNanos);
     }
 
-    private void sendState(PublicStudioState projected) {
+    /**
+     * Makes the state that was sent due again when the own plot became known or moved, and when no
+     * state went out for {@link #RESEND_NANOS}. Forgetting {@code last} is all it does: the state is
+     * then projected, checked against the policy and limited like any other, and events are not replayed.
+     */
+    private void resendIfDue(long nowNanos) {
+        Optional<Plot> plotNow = plot.get();
+        boolean moved = plotNow.isPresent() && !plotNow.equals(plotSeen);
+        plotSeen = plotNow;
+        if (last != null && (moved || nowNanos - lastStateNanos >= RESEND_NANOS)) {
+            last = null;
+            dirty = true;
+        }
+    }
+
+    private void sendState(PublicStudioState projected, long nowNanos) {
         if (rev == Integer.MAX_VALUE) rev = 0;
         PublicStudioState stamped = new PublicStudioState(rev + 1, projected.foremanOnline(), projected.agents(),
             projected.counts(), projected.goal(), projected.ci(), projected.policy(), projected.tasks());
         out.state(stamped);
         rev = stamped.rev();
         last = projected;
+        lastStateNanos = nowNanos;
         dirty = false;
         loggedStateRate = false;
         MpLog.event(MpEvents.PUBLIC_STATE_SENT,
-            "player", player.get(), "studio", studio.get(), "plot", plot.getAsInt(), "rev", stamped.rev(),
+            "player", player.get(), "studio", studio.get(), "plot", plotIndex(), "rev", stamped.rev(),
             "agents", stamped.agents().size(),
             "bytes", PublicJson.toJson(stamped).toString().getBytes(StandardCharsets.UTF_8).length,
             "policy", PolicyStore.bits(stamped.policy()));
@@ -202,8 +232,10 @@ public final class PublishScheduler {
 
     private void skipped(String reason) {
         MpLog.event(MpEvents.PUBLIC_STATE_SKIPPED,
-            "player", player.get(), "studio", studio.get(), "plot", plot.getAsInt(), "rev", rev, "reason", reason);
+            "player", player.get(), "studio", studio.get(), "plot", plotIndex(), "rev", rev, "reason", reason);
     }
+
+    private int plotIndex() { return plot.get().map(Plot::index).orElse(-1); }
 
     private void prepareRate(int perSecond) {
         perSecond = Math.max(0, perSecond);

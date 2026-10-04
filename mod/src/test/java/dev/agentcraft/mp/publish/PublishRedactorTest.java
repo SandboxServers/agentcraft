@@ -327,6 +327,91 @@ class PublishRedactorTest {
         assertEquals(published, roundTrip(published));
     }
 
+    @Test void seventeen_agents_thirty_three_tasks_and_over_long_texts_stay_inside_every_wire_cap() {
+        String wide = "\"\\".repeat(100); // over every cap, and each character doubles when JSON escapes it
+        var agents = new com.google.gson.JsonArray();
+        var tasks = new com.google.gson.JsonArray();
+        for (int i = 0; i < 33; i++) {
+            var row = new com.google.gson.JsonObject();
+            for (String key : List.of("name", "skin", "activity", "title")) row.addProperty(key, wide);
+            row.addProperty("id", "%02d".formatted(i) + wide);
+            row.addProperty("state", "waiting_user");
+            row.addProperty("station", "mergestation");
+            row.addProperty("status", "cancelled");
+            row.addProperty("assignee", "00" + "x".repeat(100));
+            tasks.add(row);
+            if (i < 17) agents.add(row.deepCopy()); // an agent id has to be an identifier path, a task id does not
+            if (i < 17) agents.get(i).getAsJsonObject().addProperty("id", "%02d".formatted(i) + "x".repeat(100));
+        }
+        var snapshot = JsonParser.parseString("{\"goal\":{\"id\":\"g\",\"status\":\"active\",\"progress\":0.5}}").getAsJsonObject();
+        snapshot.getAsJsonObject("goal").addProperty("text", wide);
+        snapshot.add("agents", agents);
+        snapshot.add("tasks", tasks);
+        PublicStudioState published = Redactor.redact(ForemanStates.fromSnapshot(snapshot), new PublicPolicy(true, true, true, true));
+        assertEquals(16, published.agents().size());
+        assertEquals(32, published.tasks().size());
+        assertTrue(published.agents().stream().allMatch(agent -> agent.id().length() == 16 && agent.name().length() == 16
+            && agent.skin().length() == 16 && agent.activity().length() == 48));
+        assertTrue(published.tasks().stream().allMatch(task -> task.id().length() == 48 && task.title().length() == 80
+            && task.assignee().length() == 16));
+        assertEquals(120, published.goal().text().length());
+        assertTrue(PublicJson.toJson(published).toString().length() < 30000); // the state envelope
+        assertEquals(published, roundTrip(published));
+    }
+
+    @Test void agent_whose_id_is_not_an_identifier_path_is_left_out_with_everything_that_names_it() {
+        ForemanState state = ForemanStates.fromSnapshot(JsonParser.parseString("""
+            {"agents":[{"id":"Wren Smith","name":"Wren","skin":"wren","state":"idle","station":"desk","activity":""},
+              {"id":"Kit!","name":"Kit","skin":"kit","state":"idle","station":"desk","activity":""},
+              {"id":"rowan","name":"Rowan","skin":"rowan","state":"idle","station":"desk","activity":""}],
+             "tasks":[{"id":"t1","title":"One","status":"todo","assignee":"Wren Smith"},
+              {"id":"t2","title":"Two","status":"todo","assignee":"Kit!"},
+              {"id":"t3","title":"Three","status":"todo","assignee":"rowan"}]}
+            """).getAsJsonObject());
+        PublicPolicy all = new PublicPolicy(true, true, true, true);
+        PublicStudioState published = Redactor.redact(state, all);
+        assertEquals(List.of("rowan"), published.agents().stream().map(PublicAgent::id).toList());
+        assertEquals(java.util.Arrays.asList(null, null, "rowan"), published.tasks().stream().map(PublicTask::assignee).toList());
+        for (String id : List.of("Wren Smith", "Kit!")) {
+            assertNull(Redactor.say(state, new Protocol.AgentSay(id, "hello", "user", 1), all));
+            assertNull(Redactor.taskDone(state, null, task("t-done", Protocol.TaskStatus.DONE, id)));
+            assertNull(((PublicEvent.Say) Redactor.say(state, new Protocol.AgentSay("rowan", "hello", id, 1), all)).to());
+            assertFalse(published(published).contains(id));
+        }
+        assertNotNull(Redactor.taskDone(state, null, task("t-done", Protocol.TaskStatus.DONE, "rowan")));
+        assertEquals(published, roundTrip(published));
+    }
+
+    @Test void skin_that_is_not_an_identifier_path_becomes_the_agent_id_and_fixture_agents_are_unchanged() {
+        ForemanState state = ForemanStates.fromSnapshot(JsonParser.parseString("""
+            {"agents":[{"id":"wren","name":"Wren","skin":"Wren","state":"idle","station":"desk","activity":""},
+              {"id":"guest","name":"Guest","skin":"my skin.png","state":"idle","station":"desk","activity":""}]}
+            """).getAsJsonObject());
+        assertEquals(List.of("wren", "guest"), Redactor.redact(state, PublicPolicy.DEFAULT).agents().stream().map(PublicAgent::skin).toList());
+        for (ForemanState fixture : List.of(ForemanStates.showcase(), ForemanStates.showcaseLate())) {
+            assertFalse(fixture.agents().isEmpty());
+            assertEquals(fixture.agents().values().stream().map(agent -> List.of(agent.id(), agent.name(), agent.skin())).toList(),
+                Redactor.redact(fixture, PublicPolicy.DEFAULT).agents().stream().map(agent -> List.of(agent.id(), agent.name(), agent.skin())).toList());
+        }
+    }
+
+    @Test void task_or_agent_whose_public_id_is_already_published_is_left_out() {
+        String shared = "t".repeat(48);
+        ForemanState state = ForemanStates.fromSnapshot(JsonParser.parseString("""
+            {"agents":[{"id":"kit§c","name":"First","skin":"kit","state":"idle","station":"desk","activity":""},
+              {"id":"kit","name":"Second","skin":"kit","state":"idle","station":"desk","activity":""}],
+             "tasks":[{"id":"%1$sx","title":"Cut one","status":"todo"},{"id":"%1$sy","title":"Cut two","status":"todo"},
+              {"id":"s§c1","title":"Clean one","status":"todo","assignee":"kit"},{"id":"s1","title":"Clean two","status":"todo"}]}
+            """.formatted(shared)).getAsJsonObject());
+        PublicStudioState published = Redactor.redact(state, new PublicPolicy(false, false, true, false));
+        assertEquals(List.of("First"), published.agents().stream().map(PublicAgent::name).toList());
+        assertEquals(List.of(shared, "s1"), published.tasks().stream().map(PublicTask::id).toList());
+        assertEquals(List.of("Cut one", "Clean one"), published.tasks().stream().map(PublicTask::title).toList());
+        assertNull(published.tasks().getLast().assignee()); // the second "kit" is not published, so nothing names it
+        assertEquals(4, published.counts().todo());
+        assertEquals(published, roundTrip(published));
+    }
+
     @Test void link_down_publishes_last_agents_as_offline() throws Exception {
         ForemanState state = ForemanStates.showcase();
         var setLink = ForemanState.class.getDeclaredMethod("setLink", LinkStatus.class);
