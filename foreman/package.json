@@ -6,7 +6,7 @@
   "description": "AgentCraft Foreman: multi-agent orchestrator (Claude Agent SDK) that the Minecraft mod renders.",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "scripts": {
     "start": "node --import tsx src/main.ts",

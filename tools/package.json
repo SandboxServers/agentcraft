@@ -6,7 +6,7 @@
   "type": "module",
   "description": "AgentCraft dev tools: launcher helpers, DevBridge CLI (devcli.mjs), Foreman CLI (foremancli.mjs), scene screenshot runner (shoot.mjs) and the QA runner (qa.mjs).",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "scripts": {
     "test": "node --test",
