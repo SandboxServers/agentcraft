@@ -139,19 +139,24 @@ public final class PlotFeature {
         return published;
     }
 
-    /** Loads the registry, publishes the layouts that exist and queues the plots that were never built. */
+    /**
+     * Loads the registry, publishes the layouts that exist and queues the plots that were never built.
+     * Fails closed: on a registry file it cannot trust it throws, which stops the server before its
+     * first tick, so nobody joins a world whose plots have no owner. Nothing is installed or written.
+     */
     public static void start(MinecraftServer server) {
         if (!multiplayer(server)) return;
         PlotStore.Loaded loaded = PlotStore.load(worldRoot(server));
+        String refusal = PlotStore.startRefusal(loaded, MpServerConfig.current().plotStride()).orElse(null);
+        if (refusal != null) {
+            // The frozen mp catalog has no event for the registry file, so this is a plain log line.
+            AgentCraft.LOGGER.error("Refusing to start with multiplayer enabled: {}. agentcraft/plots.json in the world folder was left as it is.", refusal);
+            throw new IllegalStateException("AgentCraft multiplayer cannot start: " + refusal);
+        }
         PlotRegistry registry = new PlotRegistry();
-        if (loaded.failed()) {
-            registry.freeze();
-            AgentCraft.LOGGER.warn("Could not read the plot registry; plots will not be saved over it");
-        } else {
-            registry.replaceAll(loaded.plots());
-            for (Plot plot : registry.all()) {
-                PlotStore.loadAnchors(worldRoot(server), plot.index()).ifPresent(layout -> Anchors.publish(plot.owner(), layout));
-            }
+        registry.replaceAll(loaded.plots());
+        for (Plot plot : registry.all()) {
+            PlotStore.loadAnchors(worldRoot(server), plot.index()).ifPresent(layout -> Anchors.publish(plot.owner(), layout));
         }
         Plots.install(registry);
         // A server that stopped between an allocation and its queued build leaves a plot without a

@@ -252,6 +252,41 @@ public final class PlotCommandGameTest {
     }
 
     @GameTest(maxTicks = 200)
+    public void hqRefusesAnotherBuilderInMultiplayer(GameTestHelper helper) throws CommandSyntaxException {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer op = PlotGameSupport.mock(helper);
+            StudioId studio = StudioId.of(op.getUUID());
+            helper.assertTrue(PlotFeature.allocate(server, op.getUUID()), "the operator owns plot 0");
+            CommandSourceStack source = PlotGameSupport.player(server, op, true);
+            var dispatcher = server.getCommands().getDispatcher();
+            helper.assertValueEqual(dispatcher.execute("agentcraft hq", source), 69, "the default builder still builds the caller's plot");
+            Anchors.Layout built = Anchors.forStudio(studio);
+            helper.assertValueEqual(built.anchors().size(), 69, "hq published the caller's studio");
+            // The test room ignores the plot origin: it would clear and rebuild this part of the origin site.
+            List<BlockState> before = originSite(server.overworld());
+            try (var capture = MpLog.capture()) {
+                helper.assertValueEqual(dispatcher.execute("agentcraft hq test", source), 0, "hq test on a multiplayer server");
+                helper.assertValueEqual(dispatcher.execute("agentcraft hq test force", source), 0, "hq test force on a multiplayer server");
+                helper.assertTrue(capture.lines().isEmpty(), "the refusal logs no mp event: " + capture.lines());
+            }
+            helper.assertTrue(originSite(server.overworld()).equals(before), "no block of the origin site changed");
+            helper.assertValueEqual(Anchors.forStudio(studio).revision(), built.revision(), "the caller's revision");
+            helper.assertTrue(Anchors.forStudio(studio).equals(built), "the caller's published layout is unchanged");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    private static List<BlockState> originSite(ServerLevel level) {
+        List<BlockState> states = new ArrayList<>();
+        for (BlockPos pos : BlockPos.betweenClosed(-13, 64, -13, 13, 66, 13)) states.add(level.getBlockState(pos));
+        return states;
+    }
+
+    @GameTest(maxTicks = 200)
     public void nonOpRebuildIsThrottled(GameTestHelper helper) {
         var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
         try {

@@ -9,6 +9,7 @@ import com.google.gson.JsonParser;
 import dev.agentcraft.AgentCraft;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.Plot;
+import dev.agentcraft.mp.PlotGrid;
 import dev.agentcraft.mp.StudioId;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -39,9 +40,16 @@ public final class PlotStore {
 
     private PlotStore() {}
 
-    public record Loaded(List<Plot> plots, boolean failed, int skipped) {
+    /** Why the whole registry file could not be used. A missing file is {@code NONE}: an empty registry. */
+    public enum Problem { NONE, UNREADABLE, OVERSIZED, BAD_SHAPE }
+
+    public record Loaded(List<Plot> plots, Problem problem, int skipped) {
         public Loaded {
             plots = List.copyOf(plots);
+        }
+
+        public boolean failed() {
+            return problem != Problem.NONE;
         }
     }
 
@@ -62,8 +70,11 @@ public final class PlotStore {
         Path file = plotsFile(worldRoot);
         Path tmp = file.resolveSibling("plots.json.tmp");
         try {
+            byte[] json = GSON.toJson(toJson(plots)).getBytes(StandardCharsets.UTF_8);
+            // The loader refuses a larger file and the server then refuses to start: never write one.
+            if (json.length > MAX_BYTES) return false;
             Files.createDirectories(file.getParent());
-            Files.writeString(tmp, GSON.toJson(toJson(plots)), StandardCharsets.UTF_8);
+            Files.write(tmp, json);
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             return true;
         } catch (IOException e) {
@@ -74,13 +85,15 @@ public final class PlotStore {
 
     public static Loaded load(Path worldRoot) {
         Path file = plotsFile(worldRoot);
-        if (!Files.exists(file)) return new Loaded(List.of(), false, 0);
+        // Only a file that is known to be absent is an empty registry. One whose existence cannot be
+        // determined falls through to the read below and fails there.
+        if (Files.notExists(file)) return new Loaded(List.of(), Problem.NONE, 0);
         try {
-            if (Files.size(file) > MAX_BYTES) return new Loaded(List.of(), true, 0);
+            if (Files.size(file) > MAX_BYTES) return new Loaded(List.of(), Problem.OVERSIZED, 0);
             JsonElement root = JsonParser.parseString(Files.readString(file, StandardCharsets.UTF_8));
-            if (!root.isJsonObject()) return new Loaded(List.of(), true, 0);
+            if (!root.isJsonObject()) return new Loaded(List.of(), Problem.BAD_SHAPE, 0);
             JsonElement plots = root.getAsJsonObject().get("plots");
-            if (plots == null || !plots.isJsonArray()) return new Loaded(List.of(), true, 0);
+            if (plots == null || !plots.isJsonArray()) return new Loaded(List.of(), Problem.BAD_SHAPE, 0);
             List<Plot> loaded = new ArrayList<>();
             List<AABB> boxes = new ArrayList<>();
             Set<Integer> indexes = new HashSet<>();
@@ -103,10 +116,44 @@ public final class PlotStore {
                 boxes.add(box);
                 loaded.add(plot);
             }
-            if (skipped > 0) AgentCraft.LOGGER.warn("Skipped {} invalid plot records", skipped);
-            return new Loaded(loaded, false, skipped);
+            return new Loaded(loaded, Problem.NONE, skipped);
         } catch (IOException | RuntimeException e) {
-            return new Loaded(List.of(), true, 0);
+            return new Loaded(List.of(), Problem.UNREADABLE, 0);
+        }
+    }
+
+    /**
+     * Why an enabled server must not start on {@code loaded}, or empty when it may. The next save
+     * would drop a rejected row and hand its index to a new player on top of the old build, and a
+     * client places a plot at {@code PlotGrid.originOf(index, stride)}, so one rejected row or one
+     * origin off that grid refuses the whole file. Counts only: no file content and no owner.
+     */
+    public static Optional<String> startRefusal(Loaded loaded, int stride) {
+        String whole = switch (loaded.problem()) {
+            case UNREADABLE -> "plots.json could not be read or is not JSON";
+            case OVERSIZED -> "plots.json is larger than " + MAX_BYTES + " bytes";
+            case BAD_SHAPE -> "plots.json is not an object with a \"plots\" array";
+            case NONE -> null;
+        };
+        if (whole != null) return Optional.of(whole + "; no row was loaded");
+        int rows = loaded.plots().size() + loaded.skipped();
+        if (loaded.skipped() > 0) {
+            return Optional.of(loaded.skipped() + " of " + rows + " rows in plots.json were rejected (invalid, duplicate or overlapping)");
+        }
+        int moved = 0;
+        for (Plot plot : loaded.plots()) {
+            if (!onGrid(plot, stride)) moved++;
+        }
+        if (moved == 0) return Optional.empty();
+        return Optional.of(moved + " of " + rows + " plots are not where plotStride " + stride + " puts their index:"
+            + " plots.json was written with another plotStride; restore the old value or move the plots");
+    }
+
+    private static boolean onGrid(Plot plot, int stride) {
+        try {
+            return plot.origin().equals(PlotGrid.originOf(plot.index(), stride));
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
