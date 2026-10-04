@@ -10,6 +10,7 @@ import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.world.HqWorld;
 import dev.agentcraft.mp.MpServerConfig;
 import dev.agentcraft.mp.net.MpPayloads;
+import dev.agentcraft.mp.server.StudioRange;
 import dev.agentcraft.mp.server.world.ServerWorldFeature;
 import dev.agentcraft.mp.server.plot.PlotFeature;
 import dev.agentcraft.mp.server.layout.LayoutSyncFeature;
@@ -35,6 +36,7 @@ public class AgentCraft implements ModInitializer {
 	public void onInitialize() {
 		MpServerConfig.init();
 		MpPayloads.register();
+		StudioRange.init();
 		ServerWorldFeature.init();
 		PlotFeature.init();
 		LayoutSyncFeature.init();

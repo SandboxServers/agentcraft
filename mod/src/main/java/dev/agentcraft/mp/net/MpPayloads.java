@@ -1,6 +1,7 @@
 package dev.agentcraft.mp.net;
 
 import dev.agentcraft.mp.*;
+import dev.agentcraft.mp.server.StudioRange;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import net.fabricmc.fabric.api.networking.v1.*;
@@ -28,8 +29,10 @@ public final class MpPayloads {
                 ServerPlayNetworking.send(handler.getPlayer(),hello); logSent(hello);
             });
         }));
-        ServerPlayNetworking.registerGlobalReceiver(HelloC2S.TYPE,(hello,context)->context.server().execute(()->
-            acceptHello(context.player().getUUID(),hello,MpServerConfig.current(),context.server().isDedicatedServer())));
+        ServerPlayNetworking.registerGlobalReceiver(HelloC2S.TYPE,(hello,context)->context.server().execute(()-> {
+            if(acceptHello(context.player().getUUID(),hello,MpServerConfig.current(),context.server().isDedicatedServer()))
+                StudioRange.refresh(context.server());
+        }));
         ServerPlayConnectionEvents.DISCONNECT.register((handler,server)->EQUIPPED.remove(handler.getPlayer().getUUID()));
         ServerLifecycleEvents.SERVER_STOPPED.register(server->EQUIPPED.clear());
         registered=true;
