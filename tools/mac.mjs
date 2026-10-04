@@ -168,7 +168,8 @@ function prepareAudio(dev) {
 
 async function launch(opt, summary) {
   if (process.platform !== 'darwin') throw new Error('tools/mac.mjs is for macOS');
-  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node 22+ is required');
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  if (major < 22 || (major === 22 && minor < 18)) throw new Error(`Node 22.18 or newer is required (you have ${process.version})`);
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(logDir, { recursive: true });
   if (!opt['no-game']) javaHome();
