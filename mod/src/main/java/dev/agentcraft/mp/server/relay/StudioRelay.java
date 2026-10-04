@@ -60,12 +60,22 @@ public final class StudioRelay {
         boolean online(UUID player);
     }
 
-    /** A player's rate bucket plus the rate it was built with. */
-    private record Limited(RateBucket bucket, int rate) {}
+    /** A sender's rate bucket, the rate it was built with and its last use. */
+    private static final class Limited {
+        final RateBucket bucket; final int rate; long usedNanos;
+        Limited(int rate) { this.bucket = new RateBucket(rate); this.rate = rate; }
+    }
+
+    /** A refusal line is logged at most once per sender, event and reason in
+     *  this window. A bucket unused for as long is forgotten: it is full again
+     *  after two seconds, so a new one is no different. */
+    public static final long WINDOW_NANOS = 5_000_000_000L;
+    private record Refusal(String event, UUID player, String reason) {}
 
     private static final Map<StudioId, PublicStudioState> STORED = new LinkedHashMap<>();
     private static final Map<UUID, Limited> STATE_LIMITERS = new HashMap<>();
     private static final Map<UUID, Limited> EVENT_LIMITERS = new HashMap<>();
+    private static final Map<Refusal, Long> LOGGED = new HashMap<>();
     private static final Map<StudioId, String> NAMES = new LinkedHashMap<>();
     private StudioRelay() {}
 
@@ -76,8 +86,12 @@ public final class StudioRelay {
 
     public static PublicStudioState stored(StudioId studio) { return STORED.get(studio); }
     public static String nameOf(StudioId studio) { return NAMES.getOrDefault(studio, ""); }
+    public static int tracked() {
+        return STATE_LIMITERS.size() + EVENT_LIMITERS.size() + LOGGED.size();
+    }
     public static void reset() {
         STORED.clear(); STATE_LIMITERS.clear(); EVENT_LIMITERS.clear(); NAMES.clear();
+        LOGGED.clear();
     }
 
     /* ---- accept ---- */
@@ -87,31 +101,34 @@ public final class StudioRelay {
     public static StateResult acceptState(UUID player, PublicStudioState state,
             PlotDirectory dir, MpServerConfig config, boolean equipped, long nowNanos) {
         StudioId studio = StudioId.of(player);
+        boolean token = take(STATE_LIMITERS, player,
+            config.publicStatePerSecond(), nowNanos);
+        // Looked up on every path, logged or not: a freed plot's state always goes.
+        Optional<Plot> plot = owned(studio, dir);
+        if (!token) {
+            if (throttled(MpEvents.PUBLIC_STATE_REJECTED, player,
+                    MpReasons.RATE_LIMITED, nowNanos)) return StateResult.RATE_LIMITED;
+            MpLog.event(MpEvents.PUBLIC_STATE_REJECTED,
+                "player", player, "studio", studio.owner(),
+                "plot", plot.map(Plot::index).orElse(-1),
+                "rev", state.rev(), "reason", MpReasons.RATE_LIMITED);
+            return StateResult.RATE_LIMITED;
+        }
         if (!equipped) {
+            if (throttled(MpEvents.PUBLIC_STATE_REJECTED, player,
+                    MpReasons.BAD_VERSION, nowNanos)) return StateResult.BAD_VERSION;
             MpLog.event(MpEvents.PUBLIC_STATE_REJECTED,
                 "player", player, "studio", studio.owner(), "rev", state.rev(),
                 "reason", MpReasons.BAD_VERSION);
             return StateResult.BAD_VERSION;
         }
-        Optional<Plot> plot = dir.plotOf(studio);
         if (plot.isEmpty()) {
+            if (throttled(MpEvents.PUBLIC_STATE_REJECTED, player,
+                    MpReasons.NO_PLOT, nowNanos)) return StateResult.NO_PLOT;
             MpLog.event(MpEvents.PUBLIC_STATE_REJECTED,
                 "player", player, "studio", studio.owner(), "rev", state.rev(),
                 "reason", MpReasons.NO_PLOT);
             return StateResult.NO_PLOT;
-        }
-        Limited limiter = STATE_LIMITERS.get(player);
-        if (limiter == null || limiter.rate() != config.publicStatePerSecond()) {
-            limiter = new Limited(new RateBucket(config.publicStatePerSecond()),
-                config.publicStatePerSecond());
-            STATE_LIMITERS.put(player, limiter);
-        }
-        if (!limiter.bucket().tryTake(nowNanos)) {
-            MpLog.event(MpEvents.PUBLIC_STATE_REJECTED,
-                "player", player, "studio", studio.owner(),
-                "plot", plot.get().index(), "rev", state.rev(),
-                "reason", MpReasons.RATE_LIMITED);
-            return StateResult.RATE_LIMITED;
         }
         PublicStudioState previous = STORED.get(studio);
         STORED.put(studio, state);
@@ -123,14 +140,30 @@ public final class StudioRelay {
     public static EventResult acceptEvent(UUID player, PublicEvent event,
             PlotDirectory dir, MpServerConfig config, boolean equipped, long nowNanos) {
         StudioId studio = StudioId.of(player);
+        boolean token = take(EVENT_LIMITERS, player,
+            config.publicStatePerSecond(), nowNanos);
+        // Looked up on every path, logged or not: a freed plot's state always goes.
+        Optional<Plot> plot = owned(studio, dir);
+        if (!token) {
+            if (throttled(MpEvents.STUDIO_EVENT_REJECTED, player,
+                    MpReasons.RATE_LIMITED, nowNanos)) return EventResult.RATE_LIMITED;
+            MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,
+                "player", player, "studio", studio.owner(),
+                "plot", plot.map(Plot::index).orElse(-1),
+                "reason", MpReasons.RATE_LIMITED);
+            return EventResult.RATE_LIMITED;
+        }
         if (!equipped) {
+            if (throttled(MpEvents.STUDIO_EVENT_REJECTED, player,
+                    MpReasons.BAD_VERSION, nowNanos)) return EventResult.BAD_VERSION;
             MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,
                 "player", player, "studio", studio.owner(),
                 "reason", MpReasons.BAD_VERSION);
             return EventResult.BAD_VERSION;
         }
-        Optional<Plot> plot = dir.plotOf(studio);
         if (plot.isEmpty()) {
+            if (throttled(MpEvents.STUDIO_EVENT_REJECTED, player,
+                    MpReasons.NO_PLOT, nowNanos)) return EventResult.NO_PLOT;
             MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,
                 "player", player, "studio", studio.owner(),
                 "reason", MpReasons.NO_PLOT);
@@ -138,6 +171,8 @@ public final class StudioRelay {
         }
         PublicStudioState latest = STORED.get(studio);
         if (latest == null) {
+            if (throttled(MpEvents.STUDIO_EVENT_REJECTED, player,
+                    MpReasons.UNKNOWN_AGENT, nowNanos)) return EventResult.UNKNOWN_AGENT;
             MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,
                 "player", player, "studio", studio.owner(),
                 "plot", plot.get().index(),
@@ -149,24 +184,13 @@ public final class StudioRelay {
             case PublicEvent.TaskDone t -> t.agentId();
         };
         if (latest.agents().stream().noneMatch(a -> a.id().equals(agentId))) {
+            if (throttled(MpEvents.STUDIO_EVENT_REJECTED, player,
+                    MpReasons.UNKNOWN_AGENT, nowNanos)) return EventResult.UNKNOWN_AGENT;
             MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,
                 "player", player, "studio", studio.owner(),
                 "plot", plot.get().index(),
                 "reason", MpReasons.UNKNOWN_AGENT);
             return EventResult.UNKNOWN_AGENT;
-        }
-        Limited limiter = EVENT_LIMITERS.get(player);
-        if (limiter == null || limiter.rate() != config.publicStatePerSecond()) {
-            limiter = new Limited(new RateBucket(config.publicStatePerSecond()),
-                config.publicStatePerSecond());
-            EVENT_LIMITERS.put(player, limiter);
-        }
-        if (!limiter.bucket().tryTake(nowNanos)) {
-            MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,
-                "player", player, "studio", studio.owner(),
-                "plot", plot.get().index(),
-                "reason", MpReasons.RATE_LIMITED);
-            return EventResult.RATE_LIMITED;
         }
         return EventResult.ACCEPTED;
     }
@@ -189,6 +213,7 @@ public final class StudioRelay {
      *  {@code relay_sent} only when at least one viewer received it. */
     public static void relayState(ViewerSource viewers, SendSink sink,
             StudioId studio, PlotDirectory dir) {
+        Optional<Plot> plot = owned(studio, dir);
         PublicStudioState state = STORED.get(studio);
         if (state == null) return;
         List<UUID> viewerUuids = viewers.viewersOf(studio).stream()
@@ -200,7 +225,6 @@ public final class StudioRelay {
         int sent = 0;
         for (UUID uuid : viewerUuids) if (sink.sendState(uuid, payload)) sent++;
         if (sent == 0) return;
-        Optional<Plot> plot = dir.plotOf(studio);
         MpLog.event(MpEvents.RELAY_SENT,
             "player", studio.owner(), "studio", studio.owner(),
             "plot", plot.map(Plot::index).orElse(-1),
@@ -209,17 +233,23 @@ public final class StudioRelay {
 
     /** Relays an event to viewers, excluding the owner. Clears {@code Say.text}
      *  unless the studio's stored state has {@code sayText} on (deny by
-     *  default). Logs {@code relay_sent} only when something was sent. */
+     *  default), and {@code Say.to} unless it is {@code "user"} or an agent of
+     *  that state. Logs {@code relay_sent} only when something was sent. */
     public static void relayEvent(ViewerSource viewers, SendSink sink,
             StudioId studio, PublicEvent event, PlotDirectory dir) {
+        Optional<Plot> plot = owned(studio, dir);
         List<UUID> viewerUuids = viewers.viewersOf(studio).stream()
             .filter(uuid -> !uuid.equals(studio.owner())).toList();
         if (viewerUuids.isEmpty()) return;
         PublicEvent out = event;
         if (event instanceof PublicEvent.Say say) {
             PublicStudioState latest = STORED.get(studio);
-            if (latest == null || !latest.policy().sayText())
-                out = new PublicEvent.Say(say.agentId(), say.to(), null, say.length());
+            String to = say.to();
+            boolean known = to == null || to.equals("user") || (latest != null
+                && latest.agents().stream().anyMatch(a -> a.id().equals(to)));
+            boolean text = latest != null && latest.policy().sayText();
+            if (!known || !text) out = new PublicEvent.Say(say.agentId(),
+                known ? to : null, text ? say.text() : null, say.length());
         }
         StudioEventS2C payload = new StudioEventS2C(studio, out);
         int bytes = PublicJson.toJson(out).toString()
@@ -227,7 +257,6 @@ public final class StudioRelay {
         int sent = 0;
         for (UUID uuid : viewerUuids) if (sink.sendEvent(uuid, payload)) sent++;
         if (sent == 0) return;
-        Optional<Plot> plot = dir.plotOf(studio);
         MpLog.event(MpEvents.RELAY_SENT,
             "player", studio.owner(), "studio", studio.owner(),
             "plot", plot.map(Plot::index).orElse(-1),
@@ -244,6 +273,7 @@ public final class StudioRelay {
             MpServerConfig config) {
         StudioId studio = plot.owner();
         if (viewerUuid.equals(studio.owner())) return;
+        if (owned(studio, dir).isEmpty()) return; // freed plot: nothing to send
         String name = NAMES.getOrDefault(studio, "");
         sink.sendPresence(viewerUuid,
             new PresenceS2C(studio, name, online.online(studio.owner())));
@@ -259,7 +289,7 @@ public final class StudioRelay {
             MpServerConfig config) {
         StudioId studio = StudioId.of(uuid);
         NAMES.put(studio, name);
-        Optional<Plot> plot = dir.plotOf(studio);
+        Optional<Plot> plot = owned(studio, dir);
         if (plot.isEmpty()) return;
         List<UUID> viewerUuids = viewers.viewersOf(studio).stream()
             .filter(v -> !v.equals(studio.owner())).toList();
@@ -274,16 +304,14 @@ public final class StudioRelay {
             "plot", plot.map(Plot::index).orElse(-1), "online", true);
     }
 
-    /** Owner disconnected: clears rate state, stores an offline copy of the
+    /** Owner disconnected: keeps rate state, stores an offline copy of the
      *  latest state, broadcasts offline presence plus that state to viewers,
      *  and logs {@code presence}. */
     public static void onDisconnect(ViewerSource viewers, SendSink sink,
             UUID uuid, String name, PlotDirectory dir,
             MpServerConfig config) {
         StudioId studio = StudioId.of(uuid);
-        STATE_LIMITERS.remove(uuid);
-        EVENT_LIMITERS.remove(uuid);
-        Optional<Plot> plot = dir.plotOf(studio);
+        Optional<Plot> plot = owned(studio, dir);
         if (plot.isEmpty()) {
             NAMES.remove(studio);
             return;
@@ -305,6 +333,41 @@ public final class StudioRelay {
         MpLog.event(MpEvents.PRESENCE,
             "player", studio.owner(), "studio", studio.owner(),
             "plot", plot.map(Plot::index).orElse(-1), "online", false);
+    }
+
+    /** Takes a token from the sender's bucket. A sender with no hello or no
+     *  plot has a bucket too; buckets unused for a window are dropped here. */
+    private static boolean take(Map<UUID, Limited> limiters, UUID player,
+            int rate, long nowNanos) {
+        Limited limiter = limiters.get(player);
+        if (limiter == null || limiter.rate != rate) {
+            limiters.values().removeIf(l -> nowNanos - l.usedNanos >= WINDOW_NANOS);
+            limiter = new Limited(rate);
+            limiters.put(player, limiter);
+        }
+        limiter.usedNanos = nowNanos;
+        return limiter.bucket.tryTake(nowNanos);
+    }
+
+    /** Whether this refusal's line was already logged within the window. The
+     *  refusal never depends on the answer; expired entries are dropped here. */
+    private static boolean throttled(String event, UUID player, String reason,
+            long nowNanos) {
+        Refusal key = new Refusal(event, player, reason);
+        Long last = LOGGED.get(key);
+        if (last != null && nowNanos - last < WINDOW_NANOS) return true;
+        if (last == null) LOGGED.values().removeIf(t -> nowNanos - t >= WINDOW_NANOS);
+        LOGGED.put(key, nowNanos);
+        return false;
+    }
+
+    /** The studio's plot: the only plot lookup in this class. A studio that no
+     *  longer owns one loses its stored state, so a state from before a plot
+     *  was freed is never served again. */
+    private static Optional<Plot> owned(StudioId studio, PlotDirectory dir) {
+        Optional<Plot> plot = dir.plotOf(studio);
+        if (plot.isEmpty()) STORED.remove(studio);
+        return plot;
     }
 
     /** Content equality ignoring {@code rev}; the latest revision is kept. */

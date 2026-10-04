@@ -109,8 +109,116 @@ class StudioRelayAcceptTest {
         return state(List.of(agent("alex")), policy(false), 1, true);
     }
 
+    /** One state from {@code player} at {@code nanos}; only OWNER has a plot. */
+    static StudioRelay.StateResult send(UUID player, long nanos) {
+        return StudioRelay.acceptState(player, minimalState(), fakeDir(OWNER),
+            MpServerConfig.DEFAULT, true, nanos);
+    }
+
     @BeforeEach @AfterEach
     void clean() { StudioRelay.reset(); }
+
+    @Test
+    void every_packet_takes_a_token_before_any_other_check() {
+        // Rate 4: eight tokens, no refill at one timestamp; no plot, no hello.
+        var say = new PublicEvent.Say("alex", null, null, 0);
+        for (int i = 0; i < 8; i++) {
+            assertEquals(StudioRelay.StateResult.NO_PLOT, send(STRANGER, 0));
+            assertEquals(StudioRelay.EventResult.BAD_VERSION, StudioRelay.acceptEvent(
+                OWNER, say, fakeDir(OWNER), MpServerConfig.DEFAULT, false, 0));
+        }
+        assertEquals(StudioRelay.StateResult.RATE_LIMITED, send(STRANGER, 0));
+        assertEquals(StudioRelay.EventResult.RATE_LIMITED, StudioRelay.acceptEvent(
+            OWNER, say, fakeDir(OWNER), MpServerConfig.DEFAULT, false, 0));
+    }
+
+    @Test
+    void bucket_survives_a_reconnect_and_is_dropped_once_idle() {
+        var dir = fakeDir(OWNER);
+        var none = new FixedViewers(List.of());
+        var sink = new RecordingSink();
+        for (int i = 0; i < 8; i++) send(OWNER, 0);
+        StudioRelay.onDisconnect(none, sink, OWNER, "Bob", dir, MpServerConfig.DEFAULT);
+        StudioRelay.onJoin(none, sink, OWNER, "Bob", dir, MpServerConfig.DEFAULT);
+        assertEquals(StudioRelay.StateResult.RATE_LIMITED, send(OWNER, 0));
+        // A window later the idle senders are forgotten: what is held is the
+        // newcomer's bucket and the throttle entry of its refusal.
+        for (int i = 0; i < 100; i++) send(UUID.randomUUID(), 0);
+        send(STRANGER, StudioRelay.WINDOW_NANOS);
+        assertEquals(2, StudioRelay.tracked());
+    }
+
+    @Test
+    void state_of_a_freed_plot_is_dropped_and_not_served_again() {
+        var dir = fakeDir(OWNER);
+        var plot = dir.plotOf(StudioId.of(OWNER)).orElseThrow();
+        var none = new FixedViewers(List.of());
+        var sink = new RecordingSink();
+        send(OWNER, 0);
+        // Freed: entering range of the old plot sends nothing and drops the state.
+        StudioRelay.onEntered(none, sink, alwaysOnline(true), VIEWER, plot,
+            fakeDir(STRANGER), MpServerConfig.DEFAULT);
+        assertTrue(sink.presences.isEmpty() && sink.states.isEmpty());
+        assertNull(StudioRelay.stored(StudioId.of(OWNER)));
+        // Allocated again: presence, but no state from before.
+        StudioRelay.onEntered(none, sink, alwaysOnline(true), VIEWER, plot, dir,
+            MpServerConfig.DEFAULT);
+        assertEquals(1, sink.presences.size());
+        assertTrue(sink.states.isEmpty());
+    }
+
+    @Test
+    void rate_limited_packet_after_a_free_drops_the_state_logged_or_not() {
+        var dir = fakeDir(OWNER);
+        var freed = fakeDir(STRANGER);
+        var plot = dir.plotOf(StudioId.of(OWNER)).orElseThrow();
+        var say = new PublicEvent.Say("alex", null, null, 0);
+        var cfg = MpServerConfig.DEFAULT;
+        // Eight tokens a bucket. Spending a ninth logs the refusal, so the
+        // refusal after the free is throttled; spending eight leaves it logged.
+        for (int spent : new int[] {8, 9}) for (boolean event : new boolean[] {false, true}) {
+            StudioRelay.reset();
+            for (int i = 0; i < spent; i++) {
+                send(OWNER, 0);
+                StudioRelay.acceptEvent(OWNER, say, dir, cfg, true, 0);
+            }
+            // Freed: the next packet is over the rate, and the state still goes.
+            if (event) assertEquals(StudioRelay.EventResult.RATE_LIMITED,
+                StudioRelay.acceptEvent(OWNER, say, freed, cfg, true, 0));
+            else assertEquals(StudioRelay.StateResult.RATE_LIMITED,
+                StudioRelay.acceptState(OWNER, minimalState(), freed, cfg, true, 0));
+            assertNull(StudioRelay.stored(StudioId.of(OWNER)), spent + " " + event);
+            // Allocated again: range entry sends presence and no state from before.
+            var sink = new RecordingSink();
+            StudioRelay.onEntered(new FixedViewers(List.of()), sink, alwaysOnline(true),
+                VIEWER, plot, dir, cfg);
+            assertEquals(1, sink.presences.size());
+            assertTrue(sink.states.isEmpty(), spent + " " + event);
+        }
+    }
+
+    @Test
+    void event_relay_for_a_studio_without_a_plot_drops_its_state() {
+        send(OWNER, 0);
+        StudioRelay.relayEvent(new FixedViewers(List.of()), new RecordingSink(),
+            StudioId.of(OWNER), new PublicEvent.TaskDone("alex"), fakeDir(STRANGER));
+        assertNull(StudioRelay.stored(StudioId.of(OWNER)));
+    }
+
+    @Test
+    void relay_say_to_is_kept_only_for_user_or_an_agent_of_the_studio() {
+        var dir = fakeDir(OWNER);
+        StudioRelay.acceptState(OWNER,
+            state(List.of(agent("alex"), agent("tove")), policy(true), 1, true),
+            dir, MpServerConfig.DEFAULT, true, 0);
+        var sink = new RecordingSink();
+        for (String to : new String[] {"user", "tove", "bob", "all"})
+            StudioRelay.relayEvent(new FixedViewers(List.of(VIEWER)), sink,
+                StudioId.of(OWNER), new PublicEvent.Say("alex", to, "hi", 2), dir);
+        assertEquals(java.util.Arrays.asList("user", "tove", null, null),
+            sink.eventPayloads.stream().map(p -> ((PublicEvent.Say) p.event()).to()).toList());
+        assertEquals("hi", ((PublicEvent.Say) sink.eventPayloads.get(2).event()).text());
+    }
 
     @Test
     void accepts_state_from_owner_with_plot() {
@@ -313,7 +421,7 @@ class StudioRelayAcceptTest {
         // out with studio = the sender's own id (payload has no studio field).
         var dir = fakeDir(OWNER);
         StudioRelay.acceptState(OWNER,
-            state(List.of(agent("LOCAL"), agent("other")), policy(false), 1, true),
+            state(List.of(agent("local"), agent("other")), policy(false), 1, true),
             dir, MpServerConfig.DEFAULT, true, 0);
         var sink = new RecordingSink();
         StudioRelay.relayState(new FixedViewers(List.of(VIEWER)), sink,
