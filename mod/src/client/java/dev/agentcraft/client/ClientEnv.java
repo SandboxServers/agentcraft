@@ -3,6 +3,7 @@ package dev.agentcraft.client;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 
 /**
@@ -27,6 +28,40 @@ public final class ClientEnv {
 	public static final boolean MUTE = flag("AGENTCRAFT_MUTE", true);
 	public static final boolean TAKE_FOCUS = flag("AGENTCRAFT_FOCUS", false);
 	public static final boolean AUTO_WORLD = flag("AGENTCRAFT_AUTOWORLD", true);
+
+	/**
+	 * True when this client was launched with {@code --quickPlayMultiplayer <address>}. The launch
+	 * arguments come from Fabric Loader (sanitized); they are never logged, and the parser is a pure
+	 * function so it can be unit-tested without a client. A launcher that hides its arguments must
+	 * never break startup, so a failure returns false.
+	 */
+	public static boolean quickPlayMultiplayer() {
+		try {
+			return quickPlayMultiplayer(FabricLoader.getInstance().getLaunchArguments(true));
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
+	/** Pure parser seam: only the exact multiplayer quick-play option with a nonblank value counts. */
+	public static boolean quickPlayMultiplayer(String[] args) {
+		if (args == null) {
+			return false;
+		}
+		for (int i = 0; i < args.length; i++) {
+			String arg = args[i];
+			if (arg == null) {
+				continue;
+			}
+			if (arg.equals("--quickPlayMultiplayer")) {
+				return i + 1 < args.length && args[i + 1] != null && !args[i + 1].isBlank();
+			}
+			if (arg.startsWith("--quickPlayMultiplayer=")) {
+				return !arg.substring("--quickPlayMultiplayer=".length()).isBlank();
+			}
+		}
+		return false;
+	}
 
 	public static String raw(String envName) {
 		String prop = System.getProperty(envName.toLowerCase(Locale.ROOT).replace('_', '.'));
