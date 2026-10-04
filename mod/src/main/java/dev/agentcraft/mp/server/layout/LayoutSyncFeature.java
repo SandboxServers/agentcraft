@@ -6,6 +6,7 @@ import dev.agentcraft.mp.*;
 import dev.agentcraft.mp.net.LayoutRemoveS2C;
 import dev.agentcraft.mp.net.LayoutS2C;
 import dev.agentcraft.mp.server.StudioRange;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,6 +23,8 @@ public final class LayoutSyncFeature {
     }
 
     private static final Set<StudioId> DIRTY = ConcurrentHashMap.newKeySet();
+    /** Studios with a layout sent to a viewer and not withdrawn since. Server thread only. */
+    private static final Set<StudioId> SENT = new HashSet<>();
     private static volatile boolean dirtyTrackingActive;
     private static boolean initialized;
 
@@ -47,6 +50,7 @@ public final class LayoutSyncFeature {
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
             dirtyTrackingActive = false;
             DIRTY.clear();
+            SENT.clear();
         });
         ServerTickEvents.END_SERVER_TICK.register(LayoutSyncFeature::tick);
         initialized = true;
@@ -70,19 +74,22 @@ public final class LayoutSyncFeature {
         DIRTY.add(studio);
     }
 
-    static RepublishAction republishAction(StudioId studio, PlotDirectory plots) {
+    /** {@code sent}: a viewer was sent this studio's layout and no removal has followed it. */
+    static RepublishAction republishAction(StudioId studio, PlotDirectory plots, boolean sent) {
         if (!shouldTrack(studio)) return RepublishAction.NOTHING;
         if (!Anchors.all().containsKey(studio)) return RepublishAction.SEND_REMOVAL;
+        // An empty layout is never sent, so viewers that hold an earlier one must drop it.
+        if (Anchors.forStudio(studio).isEmpty()) return sent ? RepublishAction.SEND_REMOVAL : RepublishAction.NOTHING;
         if (plots.plotOf(studio).isEmpty()) return RepublishAction.NOTHING;
-        if (Anchors.forStudio(studio).isEmpty()) return RepublishAction.NOTHING;
         return RepublishAction.SEND_LAYOUT;
     }
 
     static void publishStudio(MinecraftServer server, StudioId studio) {
         if (!enabled(server)) return;
-        switch (republishAction(studio, Plots.directory())) {
+        switch (republishAction(studio, Plots.directory(), SENT.contains(studio))) {
             case SEND_REMOVAL -> {
                 for (ServerPlayer viewer : StudioRange.viewersOf(server, studio)) sendRemove(server, viewer, studio);
+                SENT.remove(studio);
             }
             case SEND_LAYOUT -> {
                 Plot plot = Plots.directory().plotOf(studio).orElseThrow();
@@ -127,6 +134,7 @@ public final class LayoutSyncFeature {
         if (!enabled(server) || layout.isEmpty()) return;
         if (!ServerPlayNetworking.canSend(viewer, LayoutS2C.TYPE)) return;
         ServerPlayNetworking.send(viewer, new LayoutS2C(plot.owner(), plot.index(), layout));
+        SENT.add(plot.owner());
         logLayoutSent(viewer.getUUID(), plot, layout);
     }
 
