@@ -41,6 +41,8 @@ loom {
 	}
 }
 
+// Fork (MP-T): headless Fabric game tests in their own source set, src/gametest. Loom makes `check`
+// (and so `build`) depend on runGameTest, so every build boots this game-test server once.
 fabricApi {
 	configureTests {
 		createSourceSet = true
@@ -48,6 +50,16 @@ fabricApi {
 		enableGameTests = true
 		enableClientGameTests = false
 	}
+}
+// Keep that server safe inside a build: a 2 GB heap, a 5-minute fuse, and an empty run directory for
+// every run (Loom clears only the client game-test one), so each run builds the HQ in a fresh world.
+loom.runs.gameTest.vmArgs "-Xmx2G"
+def cleanGameTestRunDir = tasks.register("cleanGameTestRunDir", Delete) {
+	delete(layout.buildDirectory.dir("run/gameTest"))
+}
+tasks.matching { it.name == "runGameTest" }.configureEach {
+	dependsOn(cleanGameTestRunDir)
+	timeout = java.time.Duration.ofMinutes(5)
 }
 
 dependencies {
