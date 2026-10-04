@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { readServerEvents } from '../lib/mp/index.mjs';
+import { readServerEvents, waitForClients } from '../lib/mp/index.mjs';
 import { makePlan, parseOptions } from '../lib/mp/config.mjs';
 import { prepare, requireFreePorts, shutdown, withLock } from '../lib/mp/harness.mjs';
-import { gameSpec, gradleInvocation, seedGameDirs } from '../lib/mp/launch.mjs';
+import { gameSpec, gradleArguments, gradleInvocation, seedGameDirs } from '../lib/mp/launch.mjs';
 import { rconStop, readJson, recoverProcesses, saveJson, stopProcess } from '../lib/mp/processes.mjs';
 
 function temporary(t) {
@@ -75,9 +75,11 @@ test('PR3: a launcher crash between spawning the build and recording its PID is 
     }, stamp: () => 'build-start', wait: async () => { throw new Error('launcher died'); },
   }), /launcher died/);
   assert.equal('pid' in crashed, false);
+  assert.ok(line.includes(`-PmpRun=${crashed.marker}`));
   // gradlew execs Java with its arguments; the shared daemon never receives them on its command line.
+  const gradle = gradleArguments(dir, path.join(local.dir, 'launch.json'), crashed.marker).join(' ');
   const inventory = [
-    { pid: 50, groupPid: 50, command: `java -classpath gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain ${line}` },
+    { pid: 50, groupPid: 50, command: `java -classpath gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain ${gradle}` },
     { pid: 51, groupPid: 51, command: `grep ${crashed.marker}` },
     { pid: 52, groupPid: 52, command: 'java org.gradle.launcher.daemon.bootstrap.GradleDaemon' },
   ];
@@ -227,4 +229,91 @@ test('PR8: a PID reused within the same whole second is not recovered or signall
   assert.deepEqual(await stop(child, ours), [[43, 'SIGTERM'], [43, 'SIGKILL']]);
   for (const record of [leader, child]) assert.deepEqual(await stop({ ...record }, reused), []);
   assert.deepEqual(await stop({ ...leader }, ours, ours, reused), [[-42, 'SIGTERM']]); // reused between the two signals
+});
+
+test('PR9: a command that only quotes the build\'s command line is not recovered as the build', t => {
+  const { dir, local } = slot(t);
+  const marker = 'ac-mp-12345678-1234-1234-1234-123456789abc';
+  const output = path.join(local.dir, 'launch.json');
+  const gradle = gradleArguments(dir, output, marker).join(' ');
+  const jar = path.join(dir, 'mod', 'gradle', 'wrapper', 'gradle-wrapper.jar');
+  const java = `/opt/jdk-25/bin/java -Xmx64m -Xms64m -Dorg.gradle.appname=gradlew -jar ${jar}`;
+  const recovered = (platform, rows) => recoverProcesses({ kind: 'build', marker }, dir,
+    rows.map((command, i) => ({ pid: 60 + i, groupPid: 60 + i, command })), pid => `start-${pid}`, platform).map(p => p.pid);
+  // ps prints argv joined by spaces: a quoted search pattern looks just like the arguments it quotes.
+  assert.deepEqual(recovered('linux', [
+    `sh ./gradlew ${gradle}`, // as spawned, until gradlew execs Java
+    `${java} ${gradle}`,
+    `${java} --no-daemon ${gradle}`, // behind a custom Gradle command that adds its own flags
+    `grep -F sh ./gradlew ${gradle}`,
+    `grep -F ${java} ${gradle}`,
+    `sh -c ps -axww | grep -F '${java} ${gradle}'`,
+    `sh -c ps -axww | grep -F 'sh ./gradlew ${gradle}' | wc -l`,
+    `${java} ${gradle.replace(marker, 'ac-mp-00000000-0000-0000-0000-000000000000')}`, // another run's build
+  ]), [60, 61, 62]);
+  // Windows command lines keep their quoting (rows written as Node and gradlew.bat are expected to produce them).
+  const launcher = gradleInvocation(dir, output, undefined, 'win32', marker);
+  const spawned = [launcher.command, ...launcher.args.slice(0, -1), `"${launcher.args.at(-1)}"`].join(' ');
+  assert.deepEqual(recovered('win32', [
+    spawned,
+    `"C:\\Program Files\\Java\\jdk-25\\bin\\java.exe" -Xmx64m -Xms64m "-Dorg.gradle.appname=gradlew" -jar "${jar}" ${gradle}`,
+    `findstr /c:"${spawned.replaceAll('"', '')}" processes.txt`,
+    `powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object CommandLine -like '*${gradle}*'"`,
+  ]), [60, 61]);
+});
+
+test('PR10: the Windows tree kill of an unfinished build leaves Gradle daemons running; every other kind keeps the whole tree', async () => {
+  for (const kind of ['build', 'server', 'client', 'foreman']) {
+    let live = true;
+    const kills = [];
+    await stopProcess({ pid: 42, startTime: 'stamp' }, 'root', { kind, platform: 'win32', timeoutMs: 0, now: () => 0, delay: async () => {},
+      stamp: () => live ? 'stamp' : null, shell: (_root, script) => {
+        if (script.startsWith('Stop-OwnTree')) { kills.push(script); live = false; }
+        return 'False';
+      } });
+    assert.deepEqual(kills, [`Stop-OwnTree 42 'stamp'${kind === 'build' ? ' -KeepGradleDaemons' : ''} | Out-Null`]);
+  }
+  // The switch is opt-in: the singleplayer launcher's calls pass two arguments and keep killing the whole tree.
+  const helpers = fs.readFileSync(new URL('../lib/procs.ps1', import.meta.url), 'utf8');
+  assert.match(helpers, /function Stop-OwnTree\(\[int\]\$ProcessId, \[string\]\$Start, \[switch\]\$KeepGradleDaemons\)/);
+});
+
+test('PR11: an interruption or a lost process while dev.state is pending is seen before readiness is accepted', async t => {
+  const { local } = slot(t);
+  let interrupted = false, checks = 0;
+  await assert.rejects(waitForClients(local, { timeoutMs: 1000, now: () => 0, delay: async () => assert.fail('must not poll again'),
+    check: () => { checks++; if (interrupted) throw new Error('launcher interrupted'); },
+    command: async (plan, id) => {
+      interrupted = true; // mp.mjs only sets a flag on SIGINT/SIGTERM
+      const client = plan.clients.find(c => c.id === id);
+      return { ok: true, ready: true, world: { name: null, dimension: 'minecraft:overworld' }, player: { name: client.username },
+        foreman: { connected: true, url: `ws://127.0.0.1:${client.foremanPort}` } };
+    } }), /launcher interrupted/);
+  assert.equal(checks, 2);
+});
+
+test('PR12: a POSIX client that was asked to quit gets a bounded wait to exit by itself before any signal', async t => {
+  const marker = 'ac-mp-12345678-1234-1234-1234-123456789abc';
+  // dev.quit replies first and stops Minecraft 250 ms later; a hung client never gets that far.
+  // A client whose bridge did not answer was not asked, so it is signalled at once.
+  for (const [answers, exitsAfter, signalled, elapsed] of [[true, 300, [], 300], [true, Infinity, [[-42, 'SIGTERM'], [42, 'SIGKILL']], 10_000],
+    [false, Infinity, [[-42, 'SIGTERM'], [42, 'SIGKILL']], 5000]]) {
+    const { local } = slot(t, '--clients', '1');
+    const state = { ...local, processes: [{ kind: 'client', client: 'a', marker, pid: 42, groupPid: 42, startTime: 'game' }] };
+    const table = [{ pid: 42, groupPid: 42, command: `java -Dagentcraft.mp.run=${marker} @client-a.args` }];
+    const signals = [];
+    let time = 0, quitAt = Infinity, killed = false;
+    const stamp = () => killed || time >= quitAt + exitsAfter ? null : 'game';
+    await shutdown(local, state, undefined, { platform: 'linux', inventory: () => table, portOwned: () => true,
+      recover: entry => stamp() ? [{ pid: entry.pid, startTime: entry.startTime, groupPid: entry.groupPid }] : [],
+      command: async (_state, _id, type) => {
+        assert.equal(type, 'dev.quit');
+        if (!answers) throw new Error('bridge stalled');
+        quitAt = time; return { quitting: true };
+      },
+      stop: (record, root, options) => stopProcess(record, root, { ...options, platform: 'linux', stamp, inventory: () => table,
+        now: () => time, delay: async ms => { time += ms; },
+        kill: (pid, signal) => { signals.push([pid, signal]); killed ||= signal === 'SIGKILL'; } }) });
+    assert.deepEqual([signals, time, state.phase], [signalled, elapsed, 'stopped']);
+  }
 });

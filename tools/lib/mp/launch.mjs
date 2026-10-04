@@ -8,9 +8,10 @@ export const psQuote = value => `'${String(value).replaceAll("'", "''")}'`;
 // JAVA_HOME and GRADLE_USER_HOME remain inherited, including under swarm wrappers.
 export const exportScript = root => path.join(root, 'tools', 'lib', 'mp', 'export-launch.gradle');
 // The marker is an unused project property: it only puts the run's identity on the command line.
+export const gradleArguments = (root, output, marker) => ['-I', exportScript(root), 'mpExportLaunch', `-PmpLaunchFile=${output}`,
+  ...(marker ? [`-PmpRun=${marker}`] : []), '--no-configuration-cache', '--console=plain'];
 export function gradleInvocation(root, output, command, platform = process.platform, marker) {
-  const args = ['-I', exportScript(root), 'mpExportLaunch', `-PmpLaunchFile=${output}`,
-    ...(marker ? [`-PmpRun=${marker}`] : []), '--no-configuration-cache', '--console=plain'];
+  const args = gradleArguments(root, output, marker);
   const cwd = path.join(root, 'mod');
   // Node refuses to spawn a .bat or .cmd without a shell (EINVAL), so on Windows a custom one
   // runs through PowerShell like the default wrapper. PowerShell needs .\ for a file in cwd.

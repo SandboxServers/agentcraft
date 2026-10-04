@@ -114,7 +114,7 @@ export async function shutdown(plan, state, progress = () => {}, {
     if (entry.kind === 'client') {
       const client = state.clients.find(c => c.id === entry.client);
       if (records.some(record => portOwned(record, client.devPort, plan.root))) {
-        try { await command(state, client.id, 'dev.quit', {}, { timeoutMs: 5000 }); }
+        try { await command(state, client.id, 'dev.quit', {}, { timeoutMs: 5000 }); requested = true; }
         catch { /* a stalled/disconnected bridge falls back to the recorded PID */ }
       }
     } else if (entry.kind === 'server' && platform === 'win32' && state.rcon &&

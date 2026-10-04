@@ -35,6 +35,7 @@ export async function waitForClients(plan, { timeoutMs = 600_000, command = clie
       return isRemoteReady(state, client);
     }));
     scan();
+    check(); // an interruption or a process exit during the requests must not be reported as ready
     if (now() >= deadline) break;
     if (replies.every(reply => reply.status === 'fulfilled' && reply.value)) return states;
     onWait(states);
