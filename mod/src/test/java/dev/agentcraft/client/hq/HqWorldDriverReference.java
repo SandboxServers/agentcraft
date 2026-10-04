@@ -14,9 +14,10 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * Test-only copy of the pre-MP-07 {@code HqWorldDriver.compute(ForemanState)} and its helpers, taken
- * verbatim from {@code mp/integration}. The golden test compares the packet's pure
- * {@code compute(ForemanState, Layout)} against this reference so the visible state is proven
- * unchanged (apart from dropping the {@code ci:<repoId>} keys).
+ * verbatim from {@code mp/integration}, {@code ci:<repoId>} keys included. The golden tests compare
+ * the driver's full {@code compute(ForemanState)} with this reference as it is (singleplayer is
+ * unchanged), and the wire intent of {@code compute(ForemanState, Layout)} with this reference
+ * minus what the wire does not carry.
  */
 final class HqWorldDriverReference {
 	static final String BEACON_BINDING = "beacon";

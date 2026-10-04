@@ -3,12 +3,15 @@ package dev.agentcraft.client.hq;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.google.gson.JsonObject;
+import dev.agentcraft.block.LampStatus;
 import dev.agentcraft.client.foreman.ForemanState;
 import dev.agentcraft.client.foreman.ForemanStates;
+import dev.agentcraft.client.foreman.Protocol;
 import dev.agentcraft.layout.Anchor;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.net.ServerInfo;
 import dev.agentcraft.mp.state.LampStatusWire;
+import dev.agentcraft.mp.state.PublicJson;
 import dev.agentcraft.mp.state.WorldIntent;
 import java.util.ArrayList;
 import java.util.List;
@@ -229,6 +232,80 @@ class HqWorldDriverTickTest {
 		assertFalse(HqWorldDriver.applyPodiumOverride(open).podiumOpen(), "a differing wish overrides");
 	}
 
+	// ------------------------------------------------------------------ full state locally, filtered state on the wire
+
+	@Test
+	void singleplayerAppliesEverythingTheWireCannotCarry() {
+		ForemanState st = oddState();
+		List<HqWorldDriver.Wanted> applied = new ArrayList<>();
+		List<WorldIntent> sent = new ArrayList<>();
+		HqWorldDriver.Pacer pacer = new HqWorldDriver.Pacer(System::nanoTime, sent::add);
+
+		assertDoesNotThrow(() -> HqWorldDriver.tick(st, LAYOUT, false, null, pacer, (w, b, p, m) -> applied.add(w)));
+		assertEquals(1, applied.size());
+		assertHasEverything(st, applied.get(0));
+		assertEquals(applied.get(0), HqWorldDriver.wanted(), "dev.state.hq shows what singleplayer applies");
+		assertTrue(sent.isEmpty(), "singleplayer sends nothing");
+	}
+
+	@Test
+	void multiplayerOffersOnlyTheFilteredIntent() {
+		ForemanState st = oddState();
+		List<HqWorldDriver.Wanted> applied = new ArrayList<>();
+		List<WorldIntent> sent = new ArrayList<>();
+		HqWorldDriver.Pacer pacer = new HqWorldDriver.Pacer(System::nanoTime, sent::add);
+
+		assertDoesNotThrow(() -> HqWorldDriver.tick(st, LAYOUT, true, INFO, pacer, (w, b, p, m) -> applied.add(w)));
+		assertEquals(1, applied.size());
+		assertHasEverything(st, applied.get(0)); // the Applier seam is not narrowed by the wire
+
+		assertEquals(1, sent.size());
+		WorldIntent intent = sent.get(0);
+		assertEquals(64, intent.lamps().size(), "the lamps fill the wire cap and stop there");
+		assertEquals(64, intent.litMonitors().size(), "the lit monitors fill the wire cap and stop there");
+		String encoded = PublicJson.toJson(intent).toString();
+		for (String repoId : st.repos().keySet()) {
+			assertFalse(intent.lamps().containsKey("ci:" + repoId), "ci:<repoId> must not be sent");
+			assertFalse(encoded.contains(repoId), "the encoded intent must not contain the repo id " + repoId);
+		}
+		for (int n = 1; n <= 12; n++) {
+			assertEquals(n <= 8, intent.lamps().containsKey("ci:#" + n), "ci:#" + n + " on the wire");
+		}
+		for (String key : intent.lamps().keySet()) {
+			assertTrue(WorldIntent.isBinding(key), "lamp key '" + key + "' is not a legal binding");
+		}
+		assertFalse(intent.lamps().containsKey("agent:" + LONG_ID), "a 17-char id must not reach lamps");
+		assertFalse(intent.litMonitors().contains(LONG_ID), "a 17-char id must not reach litMonitors");
+		assertEquals(intent, PublicJson.intentFromJson(PublicJson.toJson(intent)), "the codec accepts it");
+
+		HqWorldDriver.Wanted shown = HqWorldDriver.wanted();
+		assertNotNull(shown);
+		assertEquals(intent.lamps().keySet(), shown.lamps().keySet(), "dev.state.hq shows what the server will show");
+		assertEquals(intent.litMonitors(), shown.monitorLit().keySet());
+	}
+
+	@Test
+	void aChangePastTheWireCapsAppliesLocallyAndSendsNothingNew() {
+		ForemanState st = oddState();
+		List<HqWorldDriver.Wanted> applied = new ArrayList<>();
+		List<WorldIntent> sent = new ArrayList<>();
+		HqWorldDriver.Applier recorder = (w, b, p, m) -> applied.add(w);
+		HqWorldDriver.Pacer pacer = new HqWorldDriver.Pacer(System::nanoTime, sent::add);
+
+		HqWorldDriver.tick(st, LAYOUT, true, INFO, pacer, recorder);
+		assertEquals(1, applied.size());
+		assertEquals(1, sent.size());
+		assertFalse(sent.get(0).lamps().containsKey("agent:bulk190"), "agent 91 of 100 is past the lamp cap");
+		assertFalse(sent.get(0).litMonitors().contains("bulk190"), "agent 91 of 100 is past the monitor cap");
+
+		// idle -> done changes this agent's lamp only (neither state moves the beacon).
+		patch(st, "agent", "bulk190", "state", "done");
+		HqWorldDriver.tick(st, LAYOUT, true, INFO, pacer, recorder);
+		assertEquals(2, applied.size(), "a change the wire does not carry is still applied locally");
+		assertEquals(LampStatus.DONE, applied.get(1).lamps().get("agent:bulk190"), "the applied Wanted carries the new state");
+		assertEquals(1, sent.size(), "the filtered intent did not change, so nothing new is sent");
+	}
+
 	// ------------------------------------------------------------------ content compare
 
 	@Test
@@ -245,6 +322,66 @@ class HqWorldDriverTickTest {
 
 	private static HqWorldDriver.Pacer pacer() {
 		return new HqWorldDriver.Pacer(System::nanoTime, intent -> {});
+	}
+
+	/** 17 characters: one more than the wire carries. */
+	private static final String LONG_ID = "0123456789abcdefg";
+
+	/**
+	 * The busy showcase plus data past every wire limit: 12 repos, an active agent with a 17-character
+	 * id, an off-shift agent and 100 more active agents (108 in all).
+	 */
+	private static ForemanState oddState() {
+		ForemanState st = ForemanStates.showcase();
+		for (int i = 2; i <= 12; i++) {
+			JsonObject repo = new JsonObject();
+			repo.addProperty("id", "extra-repo-" + i);
+			repo.addProperty("ci", i % 2 == 0 ? "pass" : "running");
+			upsert(st, "repo", repo);
+		}
+		upsert(st, "agent", agent(LONG_ID, true));
+		upsert(st, "agent", agent("offshift", false));
+		for (int i = 100; i < 200; i++) {
+			upsert(st, "agent", agent("bulk" + i, true));
+		}
+		return st;
+	}
+
+	private static JsonObject agent(String id, boolean active) {
+		JsonObject agent = new JsonObject();
+		agent.addProperty("id", id);
+		agent.addProperty("state", "idle");
+		agent.addProperty("active", active);
+		return agent;
+	}
+
+	private static void upsert(ForemanState st, String kind, JsonObject value) {
+		JsonObject msg = new JsonObject();
+		msg.addProperty("v", 1);
+		msg.addProperty("type", kind + ".upsert");
+		msg.add(kind, value);
+		assertTrue(st.inject(kind + ".upsert", msg), kind + " " + value.get("id") + " should be accepted into the state");
+	}
+
+	/** The pre-MP-07 singleplayer state: nothing is capped, renamed or left out. */
+	private static void assertHasEverything(ForemanState st, HqWorldDriver.Wanted w) {
+		HqWorldDriverReference.Reference ref = HqWorldDriverReference.compute(st);
+		assertEquals(new HqWorldDriver.Wanted(ref.lamps(), ref.podiumOpen(), ref.mergeActive(), ref.monitorLit()), w,
+			"the applied Wanted differs from the reference");
+		assertEquals(12, st.repos().size());
+		int n = 0;
+		for (Protocol.Repo r : st.repos().values()) {
+			LampStatus ci = LampStatus.forCi(r.ci().wire());
+			assertEquals(ci, w.lamps().get("ci:#" + (++n)), "ci:#" + n);
+			assertEquals(ci, w.lamps().get("ci:" + r.id()), "ci:" + r.id());
+		}
+		assertEquals(108, st.agents().size());
+		for (Protocol.Agent a : st.agents().values()) {
+			assertTrue(w.lamps().containsKey("agent:" + a.id()), "lamp of agent " + a.id());
+			assertEquals(a.isActive(), w.monitorLit().get(a.id()), "monitor of agent " + a.id());
+		}
+		assertEquals(LampStatus.IDLE, w.lamps().get("agent:" + LONG_ID), "the 17-char agent keeps its lamp");
+		assertEquals(LampStatus.OFF, w.lamps().get("agent:offshift"), "an off-shift agent's lamp is off");
 	}
 
 	private static void patch(ForemanState st, String kind, String id, String key, String value) {
