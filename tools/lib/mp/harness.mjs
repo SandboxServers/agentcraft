@@ -108,8 +108,9 @@ export async function prepare(plan, state, opt, progress, check, { spawnBuild = 
   const output = path.join(plan.dir, 'launch.json');
   if (!opt['no-build']) {
     progress('Preparing Loom launch metadata (no game tasks)...');
-    const spec = gradleInvocation(plan.root, output, opt['gradle-command']);
     const entry = { kind: 'build', marker: `ac-mp-${randomUUID()}`, log: path.join(plan.dir, 'build.log') };
+    // The marker rides on the Gradle command line, so down finds the build without a recorded PID.
+    const spec = gradleInvocation(plan.root, output, opt['gradle-command'], process.platform, entry.marker);
     state.processes.push(entry);
     saveJson(plan.file, state);
     const fd = fs.openSync(entry.log, 'w');

@@ -6,9 +6,11 @@ import { createHash } from 'node:crypto';
 export const psQuote = value => `'${String(value).replaceAll("'", "''")}'`;
 
 // JAVA_HOME and GRADLE_USER_HOME remain inherited, including under swarm wrappers.
-export function gradleInvocation(root, output, command, platform = process.platform) {
-  const args = ['-I', path.join(root, 'tools', 'lib', 'mp', 'export-launch.gradle'),
-    'mpExportLaunch', `-PmpLaunchFile=${output}`, '--no-configuration-cache', '--console=plain'];
+export const exportScript = root => path.join(root, 'tools', 'lib', 'mp', 'export-launch.gradle');
+// The marker is an unused project property: it only puts the run's identity on the command line.
+export function gradleInvocation(root, output, command, platform = process.platform, marker) {
+  const args = ['-I', exportScript(root), 'mpExportLaunch', `-PmpLaunchFile=${output}`,
+    ...(marker ? [`-PmpRun=${marker}`] : []), '--no-configuration-cache', '--console=plain'];
   if (command) return { command, args, cwd: path.join(root, 'mod') };
   if (platform === 'win32') return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
     `& .\\gradlew.bat ${args.map(psQuote).join(' ')}; exit $LASTEXITCODE`], cwd: path.join(root, 'mod') };

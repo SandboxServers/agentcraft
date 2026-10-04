@@ -192,9 +192,10 @@ import { clientCommand, waitForClients, readServerEvents, readClientEvents } fro
 const states = await waitForClients(plan);
 await clientCommand(plan, 'a', 'dev.camera', { anchor: 'cam_room' });
 await clientCommand(plan, 'b', 'dev.state');
-let { events, offset } = readServerEvents(plan, { event: 'hello_sent' });
-({ events, offset } = readServerEvents(plan, { offset }));
-const clientEvents = readClientEvents(plan, 'a'); // retain a separate offset per file
+let { events, offset, generation } = readServerEvents(plan, { event: 'hello_sent' });
+// pass both back: the generation tells a log replaced by a later `up` from one that only grew
+({ events, offset, generation } = readServerEvents(plan, { offset, generation }));
+const clientEvents = readClientEvents(plan, 'a'); // retain a separate cursor per file
 ```
 
 `readServerEvents` and `readClientEvents` read each game directory's `logs/debug.log`,

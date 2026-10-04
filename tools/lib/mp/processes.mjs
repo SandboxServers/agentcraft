@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { psQuote } from './launch.mjs';
+import { exportScript, psQuote } from './launch.mjs';
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function readJson(file) {
@@ -53,6 +53,7 @@ export function processInventory(root) {
 
 // Durable intent precedes spawn. A unique marker outside the Java argfile permits recovery
 // if the launcher dies in the tiny gap between spawn and recording the PID/start time.
+// The build's marker is a Gradle project property; the shared daemon never carries it.
 export function recoverProcesses(entry, root, inventory = processInventory(root), stamp = processStamp) {
   const found = [];
   const pending = [entry.wrapper, entry];
@@ -66,7 +67,9 @@ export function recoverProcesses(entry, root, inventory = processInventory(root)
   for (const p of inventory) {
     if (!p.command.includes(entry.marker) || found.some(record => record.pid === p.pid)) continue;
     const startsWithExe = executable => executable && (p.command.startsWith(`${executable} `) || p.command.startsWith(`"${executable}" `));
-    const direct = startsWithExe(entry.executable) || (entry.kind === 'foreman' && p.command.trim() === entry.marker);
+    // gradlew execs Java, so a build has no stable executable prefix: require its init script too.
+    const direct = startsWithExe(entry.executable) || (entry.kind === 'foreman' && p.command.trim() === entry.marker) ||
+      (entry.kind === 'build' && p.command.includes(exportScript(root)));
     const wrapper = startsWithExe(process.execPath) && p.command.includes(path.join(root, 'tools', 'lib', 'bgrun.mjs'));
     // A coordinator's grep/search containing our marker is never a harness process.
     if (!direct && !wrapper) continue;

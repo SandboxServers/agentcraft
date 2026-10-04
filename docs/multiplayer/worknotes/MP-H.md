@@ -260,3 +260,7 @@ SH
 For one-client-only reuse from another launcher, additionally exercise `devcli quit`
 then an immediate `down` / `up` under the same game reservation. Linux cooldown and all
 Windows launch/control/asset-path behavior still need their own platform UAT.
+
+## Pull-request review
+
+Three reviewer comments were checked against the code, reproduced in `tools/test/mp-pr-review.test.mjs` (`PR1`..`PR3`, each failing before its fix) and fixed. `down` and `status` no longer read `AGENTCRAFT_MP_SERVER_HEAP`, `AGENTCRAFT_MP_CLIENT_HEAP` or `AGENTCRAFT_MP_GRADLE`, so a stale launch environment cannot block cleanup; explicit heap flags are still validated for every action. The log readers now return a `generation` (a digest of the log's first complete lines, at most 4 KiB) next to `offset`, and a caller that passes both back is restarted at byte zero when a later `up` has truncated or replaced the log, even after it has regrown past the old offset; an offset alone keeps the previous shorter-file check, and two logs whose heads are identical cannot be told apart. The Gradle preparation now carries its launch marker on the command line as the unused project property `-PmpRun=<marker>`, and `recoverProcesses` accepts a build process that carries both the marker and this checkout's init-script path, so `down` finds a build whose PID was never recorded; this was checked with unit tests and a harmless stand-in child, not with a real Gradle run or on Windows.

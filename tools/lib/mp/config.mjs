@@ -37,9 +37,12 @@ export function parseOptions(argv, root, env = process.env) {
   out.profile ??= `mp-${out.slot}`;
   if (!/^[A-Za-z0-9_-]+$/.test(out.profile)) throw new Error('invalid --profile');
   out.home = path.resolve(out.home ?? path.join(root, '.agentcraft-home'));
-  out['server-heap'] = heap(out['server-heap'] ?? env.AGENTCRAFT_MP_SERVER_HEAP ?? '2G');
-  out['client-heap'] = heap(out['client-heap'] ?? env.AGENTCRAFT_MP_CLIENT_HEAP ?? '2G');
-  out['gradle-command'] ??= env.AGENTCRAFT_MP_GRADLE;
+  // Environment defaults configure a launch. down and status start no JVM, so a stale or
+  // invalid value there must never block cleanup; explicit flags are validated for every action.
+  const launchEnv = out.action === 'up' ? env : {};
+  out['server-heap'] = heap(out['server-heap'] ?? launchEnv.AGENTCRAFT_MP_SERVER_HEAP ?? '2G');
+  out['client-heap'] = heap(out['client-heap'] ?? launchEnv.AGENTCRAFT_MP_CLIENT_HEAP ?? '2G');
+  out['gradle-command'] ??= launchEnv.AGENTCRAFT_MP_GRADLE;
   return out;
 }
 

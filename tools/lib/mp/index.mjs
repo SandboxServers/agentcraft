@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DevClient } from '../devclient.mjs';
@@ -42,40 +43,57 @@ export async function waitForClients(plan, { timeoutMs = 600_000, command = clie
   throw new Error(`clients did not become ready on the remote server within ${timeoutMs}ms; see client logs`);
 }
 
-export function readLogLines(file, { offset = 0, maxBytes = 1024 * 1024 } = {}) {
+// A log's generation is a digest of its first complete lines (at most 4 KiB), which an
+// append-only file never rewrites. Two logs with identical heads are indistinguishable.
+function logGeneration(fd, length) {
+  const head = Buffer.alloc(Math.min(length, 4096));
+  return `${head.length}-${createHash('sha256').update(head.subarray(0, fs.readSync(fd, head, 0, head.length, 0))).digest('hex').slice(0, 16)}`;
+}
+
+/** Pass the returned offset and generation back together; an offset alone misses a regrown log. */
+export function readLogLines(file, { offset = 0, generation, maxBytes = 1024 * 1024 } = {}) {
   if (!Number.isInteger(offset) || offset < 0) throw new Error('invalid log offset');
+  if (generation !== undefined && !/^\d{1,4}-[0-9a-f]{16}$/.test(generation)) throw new Error('invalid log generation');
   if (!Number.isInteger(maxBytes) || maxBytes < 1024 || maxBytes > 8 * 1024 * 1024) throw new Error('maxBytes must be 1KB..8MB');
   let data;
   let fd;
   try {
     fd = fs.openSync(file, 'r');
     const size = fs.fstatSync(fd).size;
-    if (offset > size) offset = 0; // a new up truncates logs
+    // A new up truncates or replaces logs. A shorter file shows that by itself; one that has
+    // regrown past the offset only by its generation.
+    if (offset > size || (offset && generation && generation !== logGeneration(fd, Number.parseInt(generation, 10)))) offset = 0;
     data = Buffer.alloc(Math.min(maxBytes, size - offset));
     data = data.subarray(0, fs.readSync(fd, data, 0, data.length, offset));
+    const next = offset + data.lastIndexOf(10) + 1;
+    generation = next ? logGeneration(fd, next) : undefined;
   }
   catch (error) { if (error.code === 'ENOENT') return { offset: 0, lines: [] }; throw error; }
   finally { if (fd !== undefined) fs.closeSync(fd); }
+  const cursor = generation ? { generation } : {};
   const last = data.lastIndexOf(10);
   if (last < 0) {
     if (data.length === maxBytes) throw new Error(`log line exceeds ${maxBytes} bytes`);
-    return { offset, lines: [] };
+    return { offset, ...cursor, lines: [] };
   }
-  return { offset: offset + last + 1, lines: data.subarray(0, last + 1).toString('utf8').split(/\r?\n/) };
+  return { offset: offset + last + 1, ...cursor, lines: data.subarray(0, last + 1).toString('utf8').split(/\r?\n/) };
 }
 
 function readEvents(source, options = {}) {
-  const { offset, lines } = readLogLines(source.debugLog ?? path.join(source.gameDir, 'logs', 'debug.log'), options);
+  const { lines, ...cursor } = readLogLines(source.debugLog ?? path.join(source.gameDir, 'logs', 'debug.log'), options);
   const events = lines.flatMap(line => {
     const name = /\bevent=([a-z_0-9]+)/.exec(line)?.[1];
     if (!name || (options.event && name !== options.event)) return [];
     return [{ event: name, fields: Object.fromEntries([...line.matchAll(/\b([A-Za-z_][A-Za-z_0-9]*)=([^\s]+)/g)]
       .map(match => [match[1], match[2]])), line }];
   });
-  return { offset, events };
+  return { ...cursor, events };
 }
 
-/** Read DEBUG telemetry, independently of the INFO-only stdout capture. */
+/**
+ * Read DEBUG telemetry, independently of the INFO-only stdout capture. To continue, pass back
+ * both `offset` and `generation`: a log replaced by a later `up` is then read from its start.
+ */
 export const readServerEvents = (plan, options) => readEvents(plan.server, options);
 export function readClientEvents(plan, id, options) {
   const client = plan.clients.find(c => c.id === id.toLowerCase());
