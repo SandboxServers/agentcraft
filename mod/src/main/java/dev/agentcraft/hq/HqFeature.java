@@ -95,6 +95,12 @@ public final class HqFeature {
 		HqBuilder.Options options;
 		ServerPlayer owner = null;
 		if (PlotFeature.multiplayer(source.getServer())) {
+			// Only the default builder builds at a plot's origin. Another one would build at the world
+			// origin, over plot 0, and be published as the caller's studio.
+			if (!id.equals(HqBuilders.defaultId())) {
+				source.sendFailure(Component.literal("Only the default studio can be built on a multiplayer server."));
+				return 0;
+			}
 			// The caller's own plot. There is no plot argument on this command.
 			owner = source.getPlayer();
 			if (owner == null) {

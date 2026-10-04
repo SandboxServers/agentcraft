@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.players.CachedUserNameToIdResolver;
@@ -267,8 +268,8 @@ class PlotRegistryTest {
         Files.createDirectories(file.getParent());
         Files.writeString(file, "{\"plots\":["
             + "{\"index\":0,\"owner\":\"" + a + "\",\"x\":0,\"y\":0,\"z\":0},"
-            + "{\"index\":1,\"owner\":\"" + a + "\",\"x\":16,\"y\":0,\"z\":0},"
-            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":16,\"y\":0,\"z\":0}]}");
+            + "{\"index\":1,\"owner\":\"" + a + "\",\"x\":128,\"y\":0,\"z\":0},"
+            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":128,\"y\":0,\"z\":0}]}");
         PlotStore.Loaded loaded = PlotStore.load(dir);
         assertFalse(loaded.failed());
         assertEquals(2, loaded.plots().size());
@@ -276,6 +277,127 @@ class PlotRegistryTest {
         assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 1 && plot.owner().equals(StudioId.of(b))),
             "the valid third row is accepted after the second is rejected for its owner");
         assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 0 && plot.owner().equals(StudioId.of(a))));
+    }
+
+    @Test
+    void a_stored_origin_that_overlaps_an_accepted_row_is_skipped(@TempDir Path dir) throws Exception {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        UUID c = UUID.randomUUID();
+        String first = "{\"index\":0,\"owner\":\"" + a + "\",\"x\":0,\"y\":0,\"z\":0}";
+        // A distinct index and a distinct owner, 16 blocks from the first origin: the same ground.
+        String overlapping = "{\"index\":1,\"owner\":\"" + b + "\",\"x\":16,\"y\":0,\"z\":0}";
+        Path file = PlotStore.plotsFile(dir);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "{\"plots\":[" + first + "," + overlapping + "]}");
+        PlotStore.Loaded two = PlotStore.load(dir);
+        assertFalse(two.failed());
+        assertEquals(1, two.skipped());
+        assertEquals(List.of(new Plot(0, StudioId.of(a), BlockPos.ZERO)), two.plots(), "the first row wins");
+
+        // The skipped row reserves neither its index nor its owner, and a neighbour at the normal
+        // stride still loads.
+        Files.writeString(file, "{\"plots\":[" + first + "," + overlapping + ","
+            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":128,\"y\":0,\"z\":0},"
+            + "{\"index\":2,\"owner\":\"" + c + "\",\"x\":128,\"y\":0,\"z\":128}]}");
+        PlotStore.Loaded four = PlotStore.load(dir);
+        assertFalse(four.failed());
+        assertEquals(1, four.skipped());
+        assertEquals(List.of(
+            new Plot(0, StudioId.of(a), BlockPos.ZERO),
+            new Plot(1, StudioId.of(b), PlotGrid.originOf(1, 128)),
+            new Plot(2, StudioId.of(c), PlotGrid.originOf(2, 128))), four.plots());
+        PlotRegistry registry = new PlotRegistry();
+        registry.replaceAll(four.plots());
+        assertEquals(StudioId.of(a), registry.plotAt(new BlockPos(16, 64, 0)).orElseThrow().owner());
+        assertEquals(PlotGrid.originOf(1, 128), registry.plotOf(StudioId.of(b)).orElseThrow().origin());
+    }
+
+    @Test
+    void a_missing_or_clean_registry_file_does_not_refuse_the_start(@TempDir Path dir) throws Exception {
+        assertEquals(Optional.empty(), PlotStore.startRefusal(PlotStore.load(dir), 128), "a missing file is an empty registry");
+        assertEquals(Optional.empty(), PlotStore.startRefusal(loadText(dir, "{\"plots\":[]}"), 128));
+        String two = "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "," + row(1, UUID.randomUUID(), 128, 0) + "]}";
+        assertEquals(Optional.empty(), PlotStore.startRefusal(loadText(dir, two), 128));
+    }
+
+    @Test
+    void a_file_that_cannot_be_used_refuses_the_start_and_is_left_alone(@TempDir Path dir) throws Exception {
+        Path file = PlotStore.plotsFile(writeText(dir, "{"));
+        byte[] before = Files.readAllBytes(file);
+        assertEquals(Optional.of("plots.json could not be read or is not JSON; no row was loaded"),
+            PlotStore.startRefusal(PlotStore.load(dir), 128));
+        assertArrayEquals(before, Files.readAllBytes(file), "loading and deciding write nothing");
+        for (String shape : List.of("[]", "{}", "{\"plots\":{}}", "")) {
+            assertEquals(Optional.of("plots.json is not an object with a \"plots\" array; no row was loaded"),
+                PlotStore.startRefusal(loadText(dir, shape), 128), shape);
+        }
+        // A valid file padded past the cap: the size alone refuses it.
+        assertEquals(Optional.of("plots.json is larger than 1048576 bytes; no row was loaded"),
+            PlotStore.startRefusal(loadText(dir, "{\"plots\":[]}" + " ".repeat(1_048_576)), 128));
+    }
+
+    @Test
+    void any_rejected_row_refuses_the_start_with_its_count(@TempDir Path dir) throws Exception {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        UUID c = UUID.randomUUID();
+        String first = row(0, a, 0, 0);
+        String one = "1 of 2 rows in plots.json were rejected (invalid, duplicate or overlapping)";
+        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, b, 136, 0) + "]}"), 128), "an origin off the 16 grid");
+        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(0, b, 128, 0) + "]}"), 128), "a duplicate index");
+        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, a, 128, 0) + "]}"), 128), "a duplicate owner");
+        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, b, 16, 0) + "]}"), 128), "an overlapping origin");
+        String message = PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + ",7," + row(1, b, 128, 0) + "," + row(1, c, 128, 128) + "]}"), 128).orElseThrow();
+        assertEquals("2 of 4 rows in plots.json were rejected (invalid, duplicate or overlapping)", message);
+        for (UUID owner : List.of(a, b, c)) assertFalse(message.contains(owner.toString()), "the reason names no owner");
+    }
+
+    @Test
+    void a_stored_origin_off_the_current_stride_refuses_the_start(@TempDir Path dir) throws Exception {
+        PlotRegistry registry = new PlotRegistry();
+        for (int i = 0; i < 3; i++) assertTrue(registry.allocateStored(dir, StudioId.of(UUID.randomUUID()), 128).created());
+        assertNotNull(registry.assignStored(dir, StudioId.of(UUID.randomUUID()), 7, 128).plot());
+        // Every path that stores an origin (allocate and assign) leaves the file on the grid of its stride.
+        assertEquals(Optional.empty(), PlotStore.startRefusal(PlotStore.load(dir), 128));
+        // Plot 0 is at the origin at every stride; the other three would be drawn elsewhere by a client.
+        assertEquals(Optional.of("3 of 4 plots are not where plotStride 256 puts their index:"
+            + " plots.json was written with another plotStride; restore the old value or move the plots"),
+            PlotStore.startRefusal(PlotStore.load(dir), 256));
+        // A hand-moved origin is the same disagreement, and so is a stride the grid refuses.
+        String moved = "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "," + row(1, UUID.randomUUID(), 1280, 0) + "]}";
+        assertTrue(PlotStore.startRefusal(loadText(dir, moved), 128).orElseThrow().startsWith("1 of 2 plots are not where plotStride 128 "));
+        assertTrue(PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "]}"), 8).isPresent());
+        assertEquals(Optional.empty(), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "]}"), 256));
+    }
+
+    @Test
+    void a_save_the_loader_would_refuse_is_not_written(@TempDir Path dir) {
+        List<Plot> plots = new ArrayList<>();
+        for (int i = 0; i < 100; i++) plots.add(new Plot(i, StudioId.of(UUID.randomUUID()), PlotGrid.originOf(i, 128)));
+        assertTrue(PlotStore.save(dir, plots));
+        // About 80 bytes a row: 14,000 rows are past the 1,048,576 bytes the loader accepts.
+        for (int i = 100; i < 14_000; i++) plots.add(new Plot(i, StudioId.of(UUID.randomUUID()), PlotGrid.originOf(i, 128)));
+        assertFalse(PlotStore.save(dir, plots), "a file that would refuse the next start is not written");
+        PlotStore.Loaded loaded = PlotStore.load(dir);
+        assertEquals(100, loaded.plots().size(), "the previous file stays");
+        assertEquals(Optional.empty(), PlotStore.startRefusal(loaded, 128));
+    }
+
+    private static String row(int index, UUID owner, int x, int z) {
+        return "{\"index\":" + index + ",\"owner\":\"" + owner + "\",\"x\":" + x + ",\"y\":0,\"z\":" + z + "}";
+    }
+
+    private static PlotStore.Loaded loadText(Path dir, String text) throws Exception {
+        return PlotStore.load(writeText(dir, text));
+    }
+
+    /** Writes {@code text} as the registry file and returns {@code dir}. */
+    private static Path writeText(Path dir, String text) throws Exception {
+        Path file = PlotStore.plotsFile(dir);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, text);
+        return dir;
     }
 
     private static PlotStore.Loaded loadOne(Path dir, int x, int z) throws Exception {

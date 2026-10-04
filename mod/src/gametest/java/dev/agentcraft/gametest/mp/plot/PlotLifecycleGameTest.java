@@ -17,6 +17,10 @@ import dev.agentcraft.mp.server.plot.PlotRebuilds;
 import dev.agentcraft.mp.server.plot.PlotRegistry;
 import dev.agentcraft.mp.server.plot.PlotSpawn;
 import dev.agentcraft.mp.server.plot.PlotStore;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
 import net.minecraft.core.BlockPos;
@@ -235,6 +239,54 @@ public final class PlotLifecycleGameTest {
             helper.succeed();
         } finally {
             PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void startRefusesARegistryItCannotTrust(GameTestHelper helper) throws Exception {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.BUILDING);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            Path file = PlotStore.plotsFile(PlotFeature.worldRoot(server));
+            var installed = Plots.directory();
+            String row = "{\"index\":0,\"owner\":\"" + UUID.randomUUID() + "\",\"x\":0,\"y\":0,\"z\":0}";
+            // Unreadable, the wrong shape, and one rejected row beside a valid one that has no layout.
+            for (String text : List.of("{", "{\"plots\":7}", "{\"plots\":[" + row + ",7]}")) {
+                Files.createDirectories(file.getParent());
+                Files.writeString(file, text);
+                helper.assertTrue(startRefusal(server) != null, "start refuses " + text.length() + " bytes of bad registry");
+                helper.assertTrue(Plots.directory() == installed, "a refused start installs no registry");
+                helper.assertFalse(PlotFeature.buildPending(0), "a refused start queues no build");
+                helper.assertTrue(Arrays.equals(Files.readAllBytes(file), text.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                    "a refused start leaves plots.json as it is");
+            }
+            // Written at stride 128, started at 256: a client would draw plot 1 somewhere else.
+            List<Plot> plots = List.of(new Plot(0, StudioId.of(UUID.randomUUID()), BlockPos.ZERO),
+                new Plot(1, StudioId.of(UUID.randomUUID()), PlotGrid.originOf(1, 128)));
+            helper.assertTrue(PlotStore.save(PlotFeature.worldRoot(server), plots), "plots.json written");
+            byte[] saved = Files.readAllBytes(file);
+            MpServerConfig.install(new MpServerConfig(true, 256, true, true, true, true, true, 12, 4, 10));
+            String reason = startRefusal(server);
+            helper.assertTrue(reason != null && reason.contains("another plotStride"), "start refuses a changed stride: " + reason);
+            helper.assertTrue(Plots.directory() == installed, "a refused stride installs no registry");
+            helper.assertTrue(Arrays.equals(Files.readAllBytes(file), saved), "a refused stride leaves plots.json as it is");
+            // The same file at the stride it was written with starts.
+            MpServerConfig.install(PlotGameSupport.BUILDING);
+            helper.assertTrue(startRefusal(server) == null, "the stored stride starts");
+            helper.assertValueEqual(Plots.directory().all().size(), 2, "both rows are installed");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    /** The message {@code PlotFeature.start} threw, or null when it started. */
+    private static String startRefusal(MinecraftServer server) {
+        try {
+            PlotFeature.start(server);
+            return null;
+        } catch (IllegalStateException refused) {
+            return refused.getMessage();
         }
     }
 

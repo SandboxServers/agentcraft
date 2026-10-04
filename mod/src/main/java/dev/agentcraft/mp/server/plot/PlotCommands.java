@@ -116,14 +116,12 @@ public final class PlotCommands {
         var builder = dev.agentcraft.hq.HqBuilders.get(dev.agentcraft.hq.HqBuilders.defaultId());
         if (builder == null) return refuse(source, REBUILD, plot.index(), plot.owner().owner(), "No HQ builder is registered.");
         ServerPlayer actor = source.getPlayer();
-        if (!op(source) && actor != null) {
-            int now = source.getServer().getTickCount();
-            if (!PlotRebuilds.allowed(actor.getUUID(), now)) {
-                int seconds = PlotRebuilds.remainingSeconds(actor.getUUID(), now);
-                return refuse(source, REBUILD, plot.index(), plot.owner().owner(),
-                    "You can rebuild again in " + seconds + " seconds.");
-            }
-            PlotRebuilds.note(actor.getUUID(), now);
+        boolean limited = !op(source) && actor != null;
+        int now = source.getServer().getTickCount();
+        if (limited && !PlotRebuilds.allowed(actor.getUUID(), now)) {
+            int seconds = PlotRebuilds.remainingSeconds(actor.getUUID(), now);
+            return refuse(source, REBUILD, plot.index(), plot.owner().owner(),
+                "You can rebuild again in " + seconds + " seconds.");
         }
         Anchors.Layout layout;
         try {
@@ -133,6 +131,9 @@ public final class PlotCommands {
             AgentCraft.LOGGER.error("Plot {} failed to rebuild", plot.index(), e);
             return refuse(source, REBUILD, plot.index(), plot.owner().owner(), "Rebuild failed.");
         }
+        // The window starts only once the build has succeeded: a build that threw must not lock the
+        // player out of the retry.
+        if (limited) PlotRebuilds.note(actor.getUUID(), now);
         ServerPlayer owner = source.getServer().getPlayerList().getPlayer(plot.owner().owner());
         if (owner != null) PlotSpawn.applyRespawn(owner, layout);
         else if (source.getPlayer() != null && plot.owner().equals(StudioId.of(source.getPlayer().getUUID()))) {

@@ -51,7 +51,7 @@ public final class PlotRegistry implements PlotDirectory {
         return byIndex.get(index);
     }
 
-    /** A corrupt registry file must not be replaced by a later save. */
+    /** After a failed rollback save the file and memory disagree: nothing may write the file again. */
     public void freeze() {
         frozen = true;
     }

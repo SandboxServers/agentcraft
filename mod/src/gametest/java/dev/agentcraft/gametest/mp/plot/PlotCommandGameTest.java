@@ -2,6 +2,8 @@ package dev.agentcraft.gametest.mp.plot;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import dev.agentcraft.block.entity.StationBlockEntity;
+import dev.agentcraft.hq.HqBuilder;
+import dev.agentcraft.hq.HqBuilders;
 import dev.agentcraft.layout.Anchor;
 import dev.agentcraft.layout.AnchorNames;
 import dev.agentcraft.layout.Anchors;
@@ -250,6 +252,41 @@ public final class PlotCommandGameTest {
     }
 
     @GameTest(maxTicks = 200)
+    public void hqRefusesAnotherBuilderInMultiplayer(GameTestHelper helper) throws CommandSyntaxException {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer op = PlotGameSupport.mock(helper);
+            StudioId studio = StudioId.of(op.getUUID());
+            helper.assertTrue(PlotFeature.allocate(server, op.getUUID()), "the operator owns plot 0");
+            CommandSourceStack source = PlotGameSupport.player(server, op, true);
+            var dispatcher = server.getCommands().getDispatcher();
+            helper.assertValueEqual(dispatcher.execute("agentcraft hq", source), 69, "the default builder still builds the caller's plot");
+            Anchors.Layout built = Anchors.forStudio(studio);
+            helper.assertValueEqual(built.anchors().size(), 69, "hq published the caller's studio");
+            // The test room ignores the plot origin: it would clear and rebuild this part of the origin site.
+            List<BlockState> before = originSite(server.overworld());
+            try (var capture = MpLog.capture()) {
+                helper.assertValueEqual(dispatcher.execute("agentcraft hq test", source), 0, "hq test on a multiplayer server");
+                helper.assertValueEqual(dispatcher.execute("agentcraft hq test force", source), 0, "hq test force on a multiplayer server");
+                helper.assertTrue(capture.lines().isEmpty(), "the refusal logs no mp event: " + capture.lines());
+            }
+            helper.assertTrue(originSite(server.overworld()).equals(before), "no block of the origin site changed");
+            helper.assertValueEqual(Anchors.forStudio(studio).revision(), built.revision(), "the caller's revision");
+            helper.assertTrue(Anchors.forStudio(studio).equals(built), "the caller's published layout is unchanged");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    private static List<BlockState> originSite(ServerLevel level) {
+        List<BlockState> states = new ArrayList<>();
+        for (BlockPos pos : BlockPos.betweenClosed(-13, 64, -13, 13, 66, 13)) states.add(level.getBlockState(pos));
+        return states;
+    }
+
+    @GameTest(maxTicks = 200)
     public void nonOpRebuildIsThrottled(GameTestHelper helper) {
         var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
         try {
@@ -272,6 +309,54 @@ public final class PlotCommandGameTest {
             CommandSourceStack op = PlotGameSupport.player(server, owner, true);
             helper.assertValueEqual(PlotCommands.rebuild(op, 0, false, false), 69, "first op rebuild");
             helper.assertValueEqual(PlotCommands.rebuild(op, 0, false, false), 69, "an operator is not limited");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest(maxTicks = 200)
+    public void failedRebuildDoesNotStartTheWindow(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer owner = PlotGameSupport.mock(helper);
+            helper.assertTrue(PlotFeature.allocate(server, owner.getUUID()), "the owner has plot 0");
+            StudioId studio = StudioId.of(owner.getUUID());
+            CommandSourceStack nonOp = PlotGameSupport.player(server, owner, false);
+            long revision = Anchors.forStudio(studio).revision();
+            String refusal = "event=plot_command player=" + owner.getUUID() + " studio=" + owner.getUUID()
+                + " plot=0 command=rebuild target_plot=0 ok=false";
+            HqBuilder real = HqBuilders.get(HqBuilders.defaultId());
+            helper.assertTrue(real != null, "a default builder is registered");
+            // Registered under the real builder's id, so the default id and the stored plan record are
+            // untouched and registering the real builder again puts everything back.
+            HqBuilders.register(new HqBuilder() {
+                @Override
+                public String id() {
+                    return real.id();
+                }
+
+                @Override
+                public String description() {
+                    return real.description();
+                }
+
+                @Override
+                public void build(ServerLevel level, Anchors.Builder anchors) {
+                    throw new IllegalStateException("game test: this builder always fails");
+                }
+            });
+            try (var capture = MpLog.capture()) {
+                helper.assertValueEqual(PlotCommands.rebuild(nonOp, 0, false, false), 0, "a failing build is refused");
+                helper.assertTrue(capture.lines().contains(refusal), "whole refusal line: " + capture.lines());
+            } finally {
+                HqBuilders.register(real);
+            }
+            helper.assertValueEqual(Anchors.forStudio(studio).revision(), revision, "the failed build published nothing");
+            helper.assertFalse(PlotRebuilds.snapshot().containsKey(owner.getUUID()), "a failed build does not start the window");
+            helper.assertValueEqual(PlotCommands.rebuild(nonOp, 0, false, false), 69, "the retry is not throttled");
+            helper.assertValueEqual(PlotCommands.rebuild(nonOp, 0, false, false), 0, "the rebuild that built starts the window");
             helper.succeed();
         } finally {
             PlotGameSupport.close(helper, session);
