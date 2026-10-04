@@ -81,14 +81,59 @@ class LayoutSyncFeatureTest {
         };
         previousDirectory = Plots.directory();
         Plots.install(fake);
-        assertEquals(LayoutSyncFeature.RepublishAction.NOTHING, LayoutSyncFeature.republishAction(local, fake));
+        assertEquals(LayoutSyncFeature.RepublishAction.NOTHING, LayoutSyncFeature.republishAction(local, fake, false));
         Anchors.publish(remote, layout);
-        assertEquals(LayoutSyncFeature.RepublishAction.SEND_LAYOUT, LayoutSyncFeature.republishAction(remote, fake));
+        assertEquals(LayoutSyncFeature.RepublishAction.SEND_LAYOUT, LayoutSyncFeature.republishAction(remote, fake, false));
         StudioId noPlot = StudioId.of(UUID.randomUUID());
         Anchors.publish(noPlot, layout);
-        assertEquals(LayoutSyncFeature.RepublishAction.NOTHING, LayoutSyncFeature.republishAction(noPlot, fake));
+        assertEquals(LayoutSyncFeature.RepublishAction.NOTHING, LayoutSyncFeature.republishAction(noPlot, fake, false));
         Anchors.remove(remote);
-        assertEquals(LayoutSyncFeature.RepublishAction.SEND_REMOVAL, LayoutSyncFeature.republishAction(remote, fake));
+        assertEquals(LayoutSyncFeature.RepublishAction.SEND_REMOVAL, LayoutSyncFeature.republishAction(remote, fake, false));
+    }
+
+    private static PlotDirectory directoryOf(Plot... plots) {
+        return new PlotDirectory() {
+            public Optional<Plot> plotOf(StudioId id) {
+                return Arrays.stream(plots).filter(p -> p.owner().equals(id)).findFirst();
+            }
+
+            public Optional<Plot> plotAt(BlockPos pos) {
+                return Optional.empty();
+            }
+
+            public Collection<Plot> all() {
+                return List.of(plots);
+            }
+        };
+    }
+
+    @Test
+    void republish_action_withdraws_an_empty_layout_only_after_one_was_sent() {
+        StudioId studio = StudioId.of(UUID.randomUUID());
+        var layout = Anchors.builder("studio").bounds(0, 60, 0, 1, 70, 1).put("a", 0, 64, 0, 0, 0).build();
+        PlotDirectory withPlot = directoryOf(new Plot(1, studio, new BlockPos(128, 0, 0)));
+        PlotDirectory noPlot = directoryOf();
+        var nothing = LayoutSyncFeature.RepublishAction.NOTHING;
+        var removal = LayoutSyncFeature.RepublishAction.SEND_REMOVAL;
+        var send = LayoutSyncFeature.RepublishAction.SEND_LAYOUT;
+        for (boolean sent : new boolean[] {false, true}) {
+            assertEquals(nothing, LayoutSyncFeature.republishAction(StudioId.LOCAL, withPlot, sent));
+            // Unpublished on the server: a removal either way, as before.
+            assertEquals(removal, LayoutSyncFeature.republishAction(studio, withPlot, sent));
+            assertEquals(removal, LayoutSyncFeature.republishAction(studio, noPlot, sent));
+        }
+        Anchors.publish(studio, Anchors.Layout.EMPTY);
+        assertEquals(nothing, LayoutSyncFeature.republishAction(studio, withPlot, false));
+        assertEquals(nothing, LayoutSyncFeature.republishAction(studio, noPlot, false));
+        assertEquals(removal, LayoutSyncFeature.republishAction(studio, withPlot, true));
+        assertEquals(removal, LayoutSyncFeature.republishAction(studio, noPlot, true));
+        Anchors.publish(studio, new Anchors.Layout("cleared", 9, layout.bounds(), Map.of()));
+        assertEquals(removal, LayoutSyncFeature.republishAction(studio, withPlot, true));
+        Anchors.publish(studio, layout);
+        for (boolean sent : new boolean[] {false, true}) {
+            assertEquals(send, LayoutSyncFeature.republishAction(studio, withPlot, sent));
+            assertEquals(nothing, LayoutSyncFeature.republishAction(studio, noPlot, sent));
+        }
     }
 
     @Test

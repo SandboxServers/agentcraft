@@ -78,6 +78,26 @@ class LayoutSyncClientTest {
     }
 
     @Test
+    void apply_ignores_a_plot_index_the_grid_cannot_place() {
+        UUID player = UUID.randomUUID();
+        StudioId remote = StudioId.of(UUID.randomUUID());
+        StudioId own = StudioId.of(player);
+        // The widest stride the hello codec accepts: ring 29 is already past the world border.
+        MpMode.joined(false, MpMode.hashServer("layout-sync.test:25604"));
+        assertTrue(MpMode.receiveHello(new HelloS2C(MpProtocol.VERSION, own, 1, new ServerInfo(1048576, 12, 4, 10)), false, player));
+        var good = samplePayload(remote);
+        LayoutSyncClient.apply(good);
+        Plot before = Studios.plot(remote).orElseThrow();
+        var newer = new Anchors.Layout("remote", 8, good.layout().bounds(), good.layout().anchors());
+        try (var capture = MpLog.capture()) {
+            assertDoesNotThrow(() -> LayoutSyncClient.apply(new LayoutS2C(remote, Integer.MAX_VALUE, newer)));
+            assertTrue(capture.lines().isEmpty());
+        }
+        assertEquals(good.layout(), Anchors.forStudio(remote));
+        assertEquals(before, Studios.plot(remote).orElseThrow());
+    }
+
+    @Test
     void remove_clears_layout_plot_view_and_logs_removed() {
         UUID player = UUID.randomUUID();
         StudioId remote = StudioId.of(UUID.randomUUID());

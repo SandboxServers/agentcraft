@@ -1,5 +1,6 @@
 package dev.agentcraft.client.mp.layout;
 
+import dev.agentcraft.AgentCraft;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.layout.Anchors.Layout;
 import dev.agentcraft.client.mp.MpMode;
@@ -28,9 +29,20 @@ public final class LayoutSyncClient {
     static void apply(LayoutS2C payload) {
         if (MpMode.current() != MpMode.MULTIPLAYER) return;
         int stride = MpMode.serverInfo().map(ServerInfo::plotStride).orElse(0);
-        if (stride > 0) Studios.setPlot(payload.studio(), payload.plotIndex(), stride);
+        if (stride > 0 && !setPlot(payload.studio(), payload.plotIndex(), stride)) return;
         Anchors.publish(payload.studio(), payload.layout());
         logLayoutApplied(payload.studio(), payload.plotIndex(), payload.layout());
+    }
+
+    /** False when the grid has no origin for this index at this stride; the registry is left as it was. */
+    private static boolean setPlot(StudioId studio, int plotIndex, int stride) {
+        try {
+            Studios.setPlot(studio, plotIndex, stride);
+            return true;
+        } catch (IllegalArgumentException e) {
+            AgentCraft.LOGGER.warn("Ignoring a layout whose plot {} has no origin at stride {}", plotIndex, stride);
+            return false;
+        }
     }
 
     static void remove(LayoutRemoveS2C payload) {
