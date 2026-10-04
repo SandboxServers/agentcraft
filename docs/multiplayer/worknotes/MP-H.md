@@ -24,7 +24,7 @@
 | `tools/test/mp-*.test.mjs` | CLI/port/heap/launch, PID reuse/crash recovery, process-group identity, summary, remote readiness, telemetry and shutdown coverage |
 | `tools/README.md` | Multiplayer harness usage, resource budget, recovery, library API and swarm-wrapper instructions |
 
-Default heaps are server **2G** and **2G per client**, with `-Xms256M`; clients use 960×540, 6-chunk render distance and 30 FPS. Flags or `AGENTCRAFT_MP_SERVER_HEAP` / `AGENTCRAFT_MP_CLIENT_HEAP` override each cap (256M..8G). The explicit user request for launch caps takes precedence over SWARM's prohibition on changing heap settings; no Gradle or existing launcher heap settings were changed. Injected JVM-option environment variables are rejected so they cannot bypass the launch caps. Native/graphics memory remains additional to Java heaps.
+Default heaps are server **2G** and **2G per client**, with `-Xms256M`; clients use 960×540 and 30 FPS, preserving the template graphics preset (see F14/F17 below). Flags or `AGENTCRAFT_MP_SERVER_HEAP` / `AGENTCRAFT_MP_CLIENT_HEAP` override each cap (256M..8G). The explicit user request for launch caps takes precedence over SWARM's prohibition on changing heap settings; no Gradle or existing launcher heap settings were changed. Injected JVM-option environment variables are rejected so they cannot bypass the launch caps. Native/graphics memory remains additional to Java heaps.
 
 The local server is loopback-only and offline, with both distinct offline player UUIDs opped. Its isolated directory has `eula=true`, `level-name=mp-world`, superflat layers 1 bedrock + 124 stone + 3 dirt + 1 grass (top y=64), and enabled AgentCraft multiplayer config. Worlds/options persist across runs. The pre-MP-F base does not implement plots/hello yet; readiness verifies a remote world, not completion of later packets.
 
@@ -32,7 +32,7 @@ The local server is loopback-only and offline, with both distinct offline player
 
 `gw build configureLaunch` generated `mod/.gradle/loom-cache/launch.cfg`. It supplies absolute asset, mod/classpath-group and game-jar paths, and no game directory. Exporting the real `runClient` / `runServer` task providers supplies the additional platform flags (including macOS `-XstartOnFirstThread`), DLI main classes and classpaths (146 client entries / 123 server entries in this checkout).
 
-The harness runs these launch descriptions directly with different working directories and explicit client `--gameDir`, username and `--quickPlayMultiplayer localhost:25692` arguments. Client env disables AutoWorld and selects the corresponding Foreman/DevBridge. Loom's client `-Xmx4G` is removed before adding the harness cap. Shared compiled classes/assets stay read-only during play. Java argfiles avoid Windows command-length limits. This resolves the configuration question; actual multi-client runtime remains unverified because of the sandbox blocker below.
+The harness runs these launch descriptions directly with different working directories and explicit client `--gameDir`, username and `--quickPlayMultiplayer localhost:25692` arguments. Client env disables AutoWorld and selects the corresponding Foreman/DevBridge. Loom's client `-Xmx4G` is removed before adding the harness cap. Shared compiled classes/assets stay read-only during play. Java argfiles avoid Windows command-length limits. This resolves the configuration question; the coordinator subsequently verified both client counts below. The review fixes still require new live verification.
 
 ## What was run
 
@@ -133,3 +133,130 @@ Run by the coordinator on 2026-10-03, outside the worker's sandbox, with the com
 - **No `mod/build.gradle` change is needed** for client directory isolation; no MP-T request.
 - The coordinator/MP-B should address Node 24 spec-reporter summaries in `foreman/src/repos.ts` (or pin the repo-test reporter to TAP at its owned boundary), then rerun `npm run check` with process-table access. This is outside MP-H's file matrix and was not changed.
 - Coordinator must complete the unsandboxed one-/two-client live check and Windows UAT before calling the packet fully verified.
+
+## Review fixes
+
+This round starts at `07b85ec` after the amended implementation `d420e0b`; both commits
+were read before editing. Changes are left uncommitted under the updated SWARM rules.
+The coordinator's results above describe the previous code. No harness live cycle was
+attempted in this review round, and **none of the Windows changes were run on Windows**.
+`gw` / `gw-raw` are the swarm wrappers around `./gradlew`; `game` reserves the game slot.
+`<worktree>` denotes this checkout, and `<repo>` the main checkout.
+
+Unless noted, named regression tests below are in `tools/test/mp-review.test.mjs` and
+are prefixed with the finding IDs. Existing behavioral assertions were retained; log
+fixtures now name the actual debug source, and the seed assertion uses the real template.
+
+| Finding | Disposition and regression evidence |
+|---|---|
+| F1 / L1 | **Fixed.** `waitForClients` incrementally scans stdout from byte zero and fails on any matching-port DevBridge error, naming client/port/cause/log. `up` stops only the failed client, preserves its recovery records, waits 35 s on macOS / 65 s on Linux / 0 on Windows, then relaunches once per client. Stop, delay, relaunch and readiness share the readiness deadline. Second failure and insufficient budget fail fast. Tests cover classifier match/no match/other port, multi-chunk scan, fail-fast even with a ready bridge, platform delays, retry exhaustion, unrelated errors and deadline consumption. The TCP-connect preflight is unchanged. README quick start and restart behavior corrected. |
+| F2 | **Fixed.** Plans carry `debugLog` for server and clients; events read `gameDir/logs/debug.log`, with a derived path for old plans. Added `readClientEvents`. DEBUG fixtures prove stdout-only INFO logs are insufficient and that client cursors are independent; existing bounded/incomplete-line tests now use the debug source. |
+| F3 | **Fixed.** Preparation has a deadline and cancellation rejection, followed by the existing recorded-identity rollback. POSIX build groups are recorded for cleanup. Fake clock/child tests cover timeout, cancellation without raw `child.kill()`, recorded build identity and environment. |
+| F4 | **Fixed.** Export depends on `configureClientLaunch`. Inspected cached Loom 1.18.2 `LoomTasks` with `javap -c -p`: client setup depends on `configureLaunch`, `downloadAssets`, and conditional `extractNatives`. Regression pins the dependency; the actual Gradle dry-run graph contains `downloadAssets` before export. No fresh-machine asset download was attempted. |
+| F5 | **Fixed.** POSIX `ps` start-time reads force `LC_ALL=C` and `TZ=UTC`. Test inspects the invocation and checks normal/zombie/missing process responses. |
+| F6 | **Not changed**, per coordinator instruction: game-wrapper detection belongs to the coordinator. Foreman launch marker remains intact. |
+| F7 | **Not fixed.** The stale-directory takeover race is real. Correct reclamation needs portable fencing or an OS-held lock, including recovery if a reclaimer crashes; another unchecked mkdir/delete sequence is not a safe targeted fix. README now explicitly requires one controller per slot. Concurrent stale-lock takeover remains an open risk. |
+| F8 | **Fixed.** Build environment preserves an explicit `GRADLE_USER_HOME`, otherwise uses this checkout's `.gradle-home`; `JAVA_HOME` is inherited. Pure environment and preparation-wiring tests cover both cases. |
+| F9 | **Fixed.** The existing crash-recovery fixture builds the bgrun/spec paths with `path.join`, matching the production platform path handling (`mp-processes.test.mjs`). |
+| F10 | **Fixed in code, Windows execution unverified.** Windows launch persists only environment overrides and calls existing `Start-Bg` with a unique marker through PowerShell, recording both returned identities. Only Foremen receive Ctrl+Break; failed delivery skips the wait. Clients retain the post-quit wait; server force termination is immediate and may lose changes since autosave. Tests exercise the Windows branch with injected helper/stamps, returned identities, JSON spec, and each stop path including successful graceful Foreman exit. |
+| F11 | **Fixed.** PowerShell calls include `-ExecutionPolicy Bypass`, including wrapper invocation. Helper argv test pins the flag and dot-sourced helper. Windows execution unverified. |
+| F12 | **Partially addressed.** Added process-stamp, start/stop branch, reused-PID refusal and invalid-state tests. Added a real harmless-child lifecycle test, which skips before spawning if inspection is denied. Here it skipped with `spawnSync ps EPERM`. Real process/lock behavior is not verified in this sandbox; F7 remains deferred. |
+| F13 | **Fixed tests.** Literal port cases include slots 0, 90, 91, 92, 98, 99. Mixed readiness keeps waiting when only B is ready and times out when A never connects. Existing config tests now assert custom home/profile and absence of `-XX:MaxHeapSize` overrides. |
+| F14 | **Fixed.** Seed preserves real template graphics settings, retaining only the FPS adjustment. Read Minecraft 26.3 sources: `Minecraft` applies the preset after load; Fancy sets render 16 / simulation 12. Dedicated server settings independently remain view 6 / simulation 4. README claim corrected; test compares against the real options template. |
+| F15 | **Fixed.** Java 25 is checked through the configured `JAVA_HOME` before preparation, including `--no-build`; old/missing/failed Java rejects clearly. Environment fallback covered with F8. Tests verify Java command/env and rejection cases. |
+| F16 | **Fixed.** README documents version-1 success/error JSON shapes and historical snapshot semantics. Nested process identities normalize to `pid`, `startTime`, `role`; regression pins summary/server/client/process keys and excludes raw internal fields. Existing tests cover stopped/ready/partial phases. |
+| F17 / L2 | **Fixed for newly seeded options.** No longer writes client `simulationDistance:4`; client minimum is 5 (`Options`), while the server's separate property accepts 4. Real-template test asserts valid seed. Existing client options remain persistent; remove a generated client `options.txt` if reseeding is wanted. |
+
+### Review verification
+
+- Required baseline: `npm test --prefix tools` — **33 passed**, zero failures/skips, before edits.
+- Initial `node --test tools/test/mp-review.test.mjs` — **3 expected failures** before implementation (F1, F2, F14/F17); subsequent targeted runs passed those regressions.
+- From `mod/`: `gw -I ../tools/lib/mp/export-launch.gradle mpExportLaunch -PmpLaunchFile=../artifacts/run/mp-92/launch.json --no-configuration-cache --console=plain --dry-run` — **BUILD SUCCESSFUL**, exit 0, Loom 1.18.2; graph includes `downloadAssets` and `configureClientLaunch`. Nonfatal `nice: setpriority: Operation not permitted`.
+- Final `npm test --prefix tools` — exit 0: **60 passed, 0 failed, 1 skipped (61 total)**.
+- `git diff --check` — exit 0, no whitespace errors. `git status --short` — only the 12 intended owned files (including this worknote and the new regression test). No staging or commit attempted.
+- Harmless process lifecycle test — **skipped**, exact preflight error `spawnSync ps EPERM`; no child spawned by that test. No Minecraft launch or process-table workaround attempted.
+
+### Coordinator live verification of the review fixes
+
+Run by the coordinator on 2026-10-04, outside the worker's sandbox, with the commands under
+"Coordinator live regression commands" below.
+
+- `npm test --prefix tools`: 61 pass, 0 fail, 0 skipped (the test that skips without a process table ran).
+- Live cycles of one, two and two clients, each `up` started immediately after the previous `down` on the
+  same slot: every `up` succeeded and every client reported ready.
+- On both restarts the harness printed `DevBridge port 8084: java.net.BindException: Address already in use`,
+  waited 35 s and relaunched that client once (the second time for both clients). `up` returned after about
+  58 s and 94 s, instead of waiting out the timeout as before.
+- After the last `down` no harness process was left.
+- Resident memory of the harness JVMs: about 2.0 GB with one client, about 2.6 GB with two.
+- Still not run: anything on Windows.
+
+### Contract change requests (review round)
+
+- Mod owner/coordinator: consider `DevBridge.setReuseAddr(!isWindows)` with the documented Windows exclusive-bind constraint and platform verification. `DevBridge.java` and `mod/DEV.md` are outside MP-H ownership and were not edited. Harness recovery does not require this change.
+- Coordinator retains F6 (swarm wrapper detection). F7 needs a follow-up portable lock/fencing design before concurrent controllers can be supported safely.
+- Windows graceful dedicated-server stop remains a future contract: existing `Start-Bg` provides no stdin, and HotSpot Ctrl+Break produces a thread dump. A remote command bridge or stdin control would be needed for a final save; no mod change made.
+
+### Coordinator live regression commands
+
+Run outside the sandbox from `<worktree>`. First export with `gw`, then hold `game`
+through all cycles. The sequence deliberately performs immediate `down` / `up` on slot 92,
+first one client, then two, then a second two-client launch. Each fresh state must pass
+`isRemoteReady`; final inspection checks identities and markers from every cycle against `ps`.
+The exit-trap cleanup runs on failures too. Preserve stderr to see the single TIME_WAIT
+recovery notice if a bind failure occurs; a clean rapid restart may not reproduce it.
+
+```sh
+cd <worktree>
+(cd mod && gw -I ../tools/lib/mp/export-launch.gradle mpExportLaunch \
+  -PmpLaunchFile=../artifacts/run/mp-92/launch.json --no-configuration-cache --console=plain)
+game sh <<'SH'
+set -eu
+cleanup() { node tools/mp.mjs down --slot 92 --json; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+: > artifacts/run/mp-92/review-runs.jsonl
+for clients in 1 2 2; do
+  node tools/mp.mjs up --slot 92 --clients "$clients" --backend sim --no-build \
+    --home "$PWD/.agentcraft-home" --profile mp-92 --timeout 240 \
+    --server-heap 2G --client-heap 2G --json
+  node --input-type=module <<'JS'
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import { clientCommand, isRemoteReady } from './tools/lib/mp/index.mjs';
+const plan = JSON.parse(fs.readFileSync('artifacts/run/mp-92/state.json'));
+fs.appendFileSync('artifacts/run/mp-92/review-runs.jsonl', JSON.stringify(plan) + '\n');
+for (const client of plan.clients) {
+  const state = await clientCommand(plan, client.id, 'dev.state');
+  console.log(JSON.stringify({client: client.id, state}));
+  assert.ok(isRemoteReady(state, client));
+}
+JS
+  node tools/mp.mjs down --slot 92 --json
+  # No cooldown here: the next loop starts up immediately on the same slot.
+done
+node tools/mp.mjs down --slot 92 --json
+node tools/mp.mjs status --slot 92 --json
+ps -axww -o pid= -o command= > artifacts/run/mp-92/review-after-down.ps
+node --input-type=module <<'JS'
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import { summarize } from './tools/lib/mp/harness.mjs';
+import { processInventory } from './tools/lib/mp/processes.mjs';
+const runs = fs.readFileSync('artifacts/run/mp-92/review-runs.jsonl', 'utf8').trim().split('\n').map(JSON.parse);
+const ps = fs.readFileSync('artifacts/run/mp-92/review-after-down.ps', 'utf8');
+for (const state of runs) {
+  const summary = summarize(state, state, processInventory(state.root));
+  assert.equal(summary.phase, 'stopped');
+  assert.ok(summary.processes.every(p => p.processes.length === 0));
+  assert.ok(state.processes.every(p => !ps.includes(p.marker)));
+}
+console.log('ps and recorded identities: no remaining harness processes');
+JS
+trap - EXIT INT TERM
+SH
+```
+
+For one-client-only reuse from another launcher, additionally exercise `devcli quit`
+then an immediate `down` / `up` under the same game reservation. Linux cooldown and all
+Windows launch/control/asset-path behavior still need their own platform UAT.
