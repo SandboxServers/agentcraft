@@ -80,6 +80,93 @@ start is left alone. `-Game` / `-Foreman` / `-Profile` / `-Home` / `-Port` narro
 `-FromSummary <launch summary>` stops exactly what one launch started; `-StopDaemon` also stops
 this checkout's Gradle daemon (never another checkout's).
 
+## Multiplayer harness
+
+`mp.mjs` prepares Loom's development launch configuration once, then starts a dedicated
+server, one local Foreman per player, and one or two clients. Requires Node 22.18+, Java 25,
+and `npm ci --prefix tools` / `npm ci --prefix foreman`. Works on macOS, Linux and Windows;
+Windows process control uses the existing PowerShell helpers and background runner.
+
+```sh
+node tools/mp.mjs up --slot 92 --clients 1 --backend sim --json
+node tools/mp.mjs status --slot 92 --json
+node tools/mp.mjs down --slot 92 --json
+node tools/mp.mjs up --slot 92 --clients 2 --backend sim --json
+node tools/mp.mjs down --slot 92 --json
+```
+
+On the swarm machine, launch through `game node tools/mp.mjs up --slot 92 ...`.
+Use `--gradle-command gw-raw` under `game` so preparation uses the swarm environment and
+does not try to reacquire the Gradle lock already held by `game`. Keep the slot held for
+the entire live check (including `down`), for example with a shell script run by `game`.
+For separate preparation, run `gw -I ../tools/lib/mp/export-launch.gradle mpExportLaunch
+-PmpLaunchFile=../artifacts/run/mp-92/launch.json --no-configuration-cache --console=plain`
+from `mod/`, then `game node tools/mp.mjs up --slot 92 --no-build ...`.
+
+`--slot` is required (0..99), with the campaign's fixed port formulas. Slot 92 uses server
+25692, Foremen 27984/27985 and DevBridges 8084/8085. `--clients` defaults to 2 and accepts 1.
+The default backend is `sim`; `--backend claude` requires your usual credentials.
+`--home` defaults to this checkout's `.agentcraft-home`, and `--profile` to `mp-<slot>`;
+client profiles append `-a` / `-b`. Never use a shared home/profile with another launcher.
+
+Each JVM has an explicit `-Xms256M` and a **2G maximum heap**, independently configurable
+with `--server-heap` / `--client-heap` or `AGENTCRAFT_MP_SERVER_HEAP` /
+`AGENTCRAFT_MP_CLIENT_HEAP` (flag wins; accepted range 256M..8G). Native memory and graphics
+use additional RAM. Client defaults also limit render distance to 6 and FPS to 30 in a
+960×540 window. `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS` must be unset
+so injected JVM flags cannot override the caps. Gradle's own memory configuration is unchanged.
+
+Gradle preparation inherits `JAVA_HOME` and `GRADLE_USER_HOME`; the portable default is
+`sh ./gradlew` on POSIX or `gradlew.bat` via PowerShell on Windows. Override the executable
+with `--gradle-command` or `AGENTCRAFT_MP_GRADLE`. `--no-build` reuses this slot's previously
+exported metadata; export again after changing code, Java/Loom settings or platforms.
+The init script reads Loom's real task classpaths, JVM arguments and DLI configuration
+without running `runClient` / `runServer` or editing `mod/build.gradle`. Direct client
+launches use separate working directories and `--gameDir`, preserving Loom's native/asset
+configuration. Java argfiles keep Windows command lines short.
+
+Everything is recorded under `artifacts/run/mp-<slot>/`: `state.json`, `launch.json`, logs,
+Java argfiles, `server/` and `client-a/` / `client-b/`. The local server is offline and bound
+to loopback, accepts the Minecraft EULA for this development run, has both test players
+opped, enables AgentCraft multiplayer, and seeds a superflat world with grass at y=64.
+Worlds and client options persist across `down` / `up`; use a fresh slot directory for a
+fresh world. The current pre-MP-F mod ignores the new multiplayer config; plot/relay checks
+require their campaign packets to land.
+
+`up` refuses occupied ports or an existing live run, waits up to `--timeout` seconds
+(default 600) per startup stage, and rolls back on failure/interruption. Readiness requires
+every client's `dev.state` to show a loaded remote world, the expected player and its own
+synced Foreman. Before MP-12, remote means `world.name === null` plus a loaded dimension;
+it does not imply that the server has sent the multiplayer hello.
+`status --json` includes process identities and the last startup states, dated by
+`statesCapturedAt`; those DevBridge snapshots are historical. Status reports `ready`,
+`partial` or `stopped` from live PID/start-time checks.
+
+Always run `down`, including after a failed `up`. It stops only recorded PID/start-time
+identities, can recover a launcher crash using unique per-process launch markers, and
+never kills shared Gradle daemons or foreign port owners. It asks an owned DevBridge to
+quit, then signals the clients, Foremen and dedicated server, with bounded waits and a
+force-stop fallback. Incomplete cleanup retains the records and returns an error so
+`down` can be retried. A stale launcher control lock is recoverable too. Process-table
+access is required: a sandbox denying `ps` or PowerShell inspection fails before launch.
+
+Later packets can import the harness helpers:
+
+```js
+import { clientCommand, waitForClients, readServerEvents } from './lib/mp/index.mjs';
+// plan = the parsed state.json or CLI JSON summary (same server/client fields).
+const states = await waitForClients(plan);
+await clientCommand(plan, 'a', 'dev.camera', { anchor: 'cam_room' });
+await clientCommand(plan, 'b', 'dev.state');
+let { events, offset } = readServerEvents(plan, { event: 'hello_sent' });
+({ events, offset } = readServerEvents(plan, { offset }));
+```
+
+`readServerEvents` returns complete telemetry lines, parsed fields and a byte offset for
+incremental reads. `clientCommand` uses the existing `DevClient`, with bounded connection
+and command timeouts, and always closes its connection. Run `npm test --prefix tools`
+for port/CLI, launch isolation, memory caps, PID recovery, cleanup and library checks.
+
 ## Dev / QA tools
 
 ```powershell
