@@ -31,7 +31,7 @@ Changes from the handoff's sequence, and why:
 
   Always pass `--home <worktree>/.agentcraft-home --profile mp-<n>`. Never use `~/.agentcraft` or the default ports 7878/7879/25565.
 - **The coordinator is the single writer of `README.md` and this file.** A packet writes only its own `worknotes/MP-xx.md`. A packet that needs a contract change (a new payload field, a renamed method, a file not in its row) raises it with the coordinator instead of editing the contract locally.
-- **Merge train:** PRs on `SandboxServers/agentcraft` (`origin`), into `main`, in dependency order. Whoever merges second rebases onto whoever merged first, for any two packets that share a file (see the matrix). Never push to `upstream`.
+- **Merge train:** PRs on `SandboxServers/agentcraft` (`origin`), into `main`, in dependency order. Whoever merges second rebases onto whoever merged first, for any two packets that share a file (see the matrix). Every PR, drafts included, requests a review from the fork's owner (`Cadacious`). Never push to `upstream`.
 - **Definition of done, every packet:**
   1. `gradlew build` is green, including the JUnit tests from MP-F and the game tests from MP-T where present.
   2. `npm run check` is green in `foreman/` and `npm test` in `tools/` if the packet touched them, on Node ≥ 22.18 (A-05).
@@ -67,7 +67,7 @@ Parallel packets build against these names. Source roots: `mod/src/main/java/dev
 - `main/mp/Plot.java`: `record Plot(int index, StudioId owner, BlockPos origin)`, plus `AABB box()` (the studio site box `{-46,60,-36, 46,100,54}` translated by `origin`) and `boolean contains(BlockPos)`. **Plot 0 has origin (0,0,0)**, so singleplayer, QA and every absolute-coordinate scene stay valid (A-40).
 - `main/mp/PlotGrid.java`, pure and unit-tested: `BlockPos originOf(int index, int stride)` (a square spiral around 0,0; x and z multiples of 16; y = 0) and `OptionalInt indexAt(int x, int z, int stride)`. The default stride is **128** (the site is 93 × 91; 35+ blocks of margin).
 - `main/mp/PlotDirectory.java`: the interface `Optional<Plot> plotOf(StudioId)`, `Optional<Plot> plotAt(BlockPos)`, `Collection<Plot> all()`. `Plots.directory()` / `Plots.install(PlotDirectory)` is a static holder whose default is the singleplayer directory (plot 0 owned by `LOCAL`). MP-03 installs the real one.
-- `client/mp/MpMode.java`: `SINGLEPLAYER` (integrated server), `MULTIPLAYER` (the server sent `HelloS2C`), `REMOTE_VANILLA` (a remote server without AgentCraft: features stay local and the HUD says so). `MpMode.current()`, plus a listener. MP-F implements the detection: the hello handler, and a timeout on join with no hello.
+- `client/mp/MpMode.java`: `SINGLEPLAYER` (integrated server), `MULTIPLAYER` (the server sent `HelloS2C`), `REMOTE_VANILLA` (a remote server without AgentCraft: features stay local and the HUD says so). `MpMode.current()`, plus a listener. MP-F implements the detection: the hello handler, and a timeout on join with no hello. `MpMode.serverInfo()` returns the accepted hello's `ServerInfo` (an `Optional`, empty unless the mode is `MULTIPLAYER`), so later packets read the stride and the rates without a second hello receiver.
 
 ### Anchors per studio (MP-F edits `main/layout/Anchors.java` once)
 
@@ -83,11 +83,11 @@ Parallel packets build against these names. Source roots: `mod/src/main/java/dev
 
 ### Payloads (all in `main/mp/net/`, registered once by `MpPayloads.register()`)
 
-The protocol version is `MpProtocol.VERSION = 1`. Every codec enforces caps (the "caps" column), so an oversized or malformed payload is refused at decode time and never reaches a handler. Names: `agentcraft:<id>`.
+The protocol version is `MpProtocol.VERSION = 1`. Every codec enforces caps (the "caps" column), so an oversized or malformed payload is refused at decode time and never reaches a handler. The same caps are refused where a record is built (an `IllegalArgumentException` naming the field), so an oversized record fails in its caller, on the caller's thread, and never reaches the encoder. Both hello codecs read `protocol` first; a hello of another protocol has the rest of its bytes skipped and decodes to a placeholder that the receiver refuses by the protocol alone, so a version mismatch is reported instead of ending the connection. `protocol` must stay the first field, a VarInt, in every later protocol. Names: `agentcraft:<id>`.
 
 | Payload | Direction | Fields | Caps | Handler owner |
 |---|---|---|---|---|
-| `HelloS2C` | S→C | `protocol`, `you: StudioId`, `plotIndex` (−1 = none yet), `ServerInfo{plotStride, relayRadiusChunks}` | | MP-F (mode detection) |
+| `HelloS2C` | S→C | `protocol`, `you: StudioId`, `plotIndex` (−1 = none yet), `ServerInfo{plotStride, relayRadiusChunks, publicStatePerSecond, intentsPerSecond}` | stride and rates checked at decode; a plot the grid cannot place decodes and is refused by `MpMode.receiveHello` | MP-F (mode detection) |
 | `HelloC2S` | C→S | `protocol`, `modVersion` | version ≤ 32 chars | MP-F (logs; server marks the player as mod-equipped) |
 | `LayoutS2C` | S→C | `studio`, `plotIndex`, `Layout` (name, revision, bounds, anchors) | ≤ 512 anchors, names ≤ 48 chars | MP-04 |
 | `LayoutRemoveS2C` | S→C | `studio` | | MP-04 |
@@ -105,7 +105,7 @@ The protocol version is `MpProtocol.VERSION = 1`. Every codec enforces caps (the
 record PublicStudioState(int rev, boolean foremanOnline, List<PublicAgent> agents /* ≤ 16 */,
                          Counts counts, GoalSummary goal, List<CiSlot> ci /* ≤ 8 */,
                          PublicPolicy policy, @Nullable List<PublicTask> tasks /* opt-in, ≤ 32 */)
-record PublicAgent(String id, String name, String skin,      // cast ids/names, ≤ 16 chars
+record PublicAgent(String id, String name, String skin,      // id and skin: an identifier path [a-z0-9/._-], ≤ 16 chars; name ≤ 16 chars
                    AgentStateWire state, StationWire station, // validated enums
                    boolean active, boolean paused, boolean awaitingUser,
                    @Nullable String activity)                 // opt-in, ≤ 48 chars
@@ -120,16 +120,19 @@ record WorldIntent(int rev, Map<String, LampStatusWire> lamps /* binding → sta
                    boolean podiumOpen, boolean mergeActive, Set<String> litMonitors /* agent ids */)
 ```
 
-- Every string is sanitized at the codec (length cap, `§` formatting codes and control characters stripped). Every enum is the wire value, validated.
-- Opt-in fields are `null` unless the owner's `PublicPolicy` flag is on. The publisher (MP-05) fills them. The record makes "on by accident" structurally visible in review.
-- MP-F also ships a Gson codec for these records (`PublicJson`), used by `dev.mp.fake` and by logs.
+- Every string is sanitized at the codec (length cap; `§` formatting codes, control and format characters, line and paragraph separators and unpaired surrogates stripped). Every enum is the wire value, validated. A state or event the server accepts always re-encodes within its envelope, so it can be relayed. An agent `id` or `skin` that is not a valid identifier path after sanitizing is refused, at decode and where the record is built: a viewer's client builds resource identifiers from both, and the game throws on any other character.
+- `GoalStatusWire` has `NONE` (wire `none`) for a studio with no current goal, sent with `progress` 0 and `text` null. The other wire enums carry the Foreman protocol's values only.
+- `WorldIntent.lamps` keys are binding names of exactly these forms: `agent:<agent id, 1 to 16 chars>`, `ci:#1` to `ci:#8`, `goal`, `goal:atrium`, `decisions`, `merge`, `beacon`. Any other key, and any key that sanitizing would change, is refused when the record is built and at decode (`WorldIntent.isBinding(String)`). A repo id is never a key: `ci:<repoId>` is not sent.
+- Opt-in fields are `null` unless the owner's `PublicPolicy` flag is on. The publisher (MP-05) fills them. The record makes "on by accident" structurally visible in review, and enforces it: a `PublicStudioState` that carries an activity, a goal text or a task list while that policy flag is off cannot be built, encoded or decoded. `Say.text` has no such guard, because an event carries no policy: MP-05 withholds it on send and MP-06 on relay, both from the studio's current `sayText`.
+- MP-F also ships a Gson codec for these records (`PublicJson`), used by `dev.mp.fake` and by the state, event and intent payloads. Its output is never passed to `MpLog`.
 
 ### Client studio registry and the renderer seam
 
-- `client/mp/Studios.java` (a real, simple implementation): `StudioView own()`, `Optional<StudioView> view(StudioId)`, `Optional<StudioView> at(BlockPos)` (by plot box, else by layout bounds), `Collection<StudioView> all()`, `int entityIdBase(StudioId)`, listeners.
+- `client/mp/Studios.java` (a real, simple implementation): `StudioView own()`, `Optional<StudioView> view(StudioId)`, `Optional<StudioView> at(BlockPos)` (by plot box, else by layout bounds), `Collection<StudioView> all()`, `Optional<Plot> plot(StudioId)` (the plot a layout sync registered with `setPlot`), `int entityIdBase(StudioId)`, listeners.
 - `client/mp/StudioView.java`: `record StudioView(StudioId id, boolean own, String ownerName, boolean online, Layout layout, @Nullable PublicStudioState publicState, int slot)`.
 - **The renderer rule every Wave-1 rendering packet follows:** `Studios.at(pos)` empty, or `own()` → today's code path, unchanged (the viewer's own `ForemanState`). A remote studio → the packet's remote rendering from `publicState` only. A renderer must never read `Foreman.state()` for a block in a remote studio.
 - **Entity id ranges:** studio slot `k` (the client-local registration order; own = 0) uses ids `−10,000 − 1,000·k` and down, 1,000 per studio. Slot 0 is today's range (A-31).
+- `client/mp/RemoteAgentClicks.java`: the seam between MP-08 (which owns the click) and MP-11 (which owns the read-only card). `set(BiConsumer<StudioView, String>)` registers the handler, `fire(StudioView, String agentId)` calls it, and with no handler registered a click on a remote agent does nothing.
 
 ### Dev overlay (removes the network from the renderer packets' critical path)
 
@@ -152,6 +155,23 @@ record WorldIntent(int rev, Map<String, LampStatusWire> lamps /* binding → sta
 
 `enabled: false` means the dedicated server acts as an ordinary AgentCraft server today does (no hello, no plots). An unknown or invalid value logs a WARN and uses the default.
 
+**Rates.** `publicStatePerSecond` and `intentsPerSecond` are per player. The server enforces each with `main/mp/RateBucket.java` (pure, unit-tested): a bucket that holds up to twice the rate and refills at the rate, so jitter never gets a compliant client refused. States and events are counted in separate buckets, both at `publicStatePerSecond`. A client sends at most the rate per second of each, read from `MpMode.serverInfo()`: states and intents are coalesced to the newest, and events beyond the rate are dropped.
+
+`MpServerConfig.install(MpServerConfig)` replaces the current config and returns the previous one. It is the seam for game tests, like `Plots.install`. Server features gate on `server.isDedicatedServer() && MpServerConfig.current().enabled()` and read `current()` at call time, never cached at `init()`. Fabric's game-test server reports itself as dedicated and finds no config file, so its config is the default. A game test that needs multiplayer installs a config, acts, asserts and restores the previous value inside one server-thread call; a multi-tick multiplayer test sets its own `environment`, so it does not share a batch with singleplayer tests. Do not seed a config file into the game-test run directory.
+
+### Who sees which studio (server)
+
+`main/mp/server/StudioRange.java` is the one authority for which studios a player sees. MP-04 and MP-06 both use it, so a studio's layout and its public state appear and disappear together.
+
+- **The rule.** A player always sees their own plot. They see another plot only while they are in the overworld and the plot is within `relayRadiusChunks`: the horizontal Chebyshev distance, in chunks, from the player's chunk to the nearest chunk that the plot's site box touches (`StudioRange.chunkDistance(plot, chunkX, chunkZ)`, pure) is at most `relayRadiusChunks`. Only mod-equipped players are viewers (their `HelloC2S` was accepted).
+- **Tracking.** In multiplayer the server recomputes every viewer's set once a second, when a player's hello is accepted, and when a feature calls `StudioRange.refresh(server)` (MP-03 does, after it allocates, assigns or frees a plot). Listeners (`StudioRange.addListener`) get `entered(viewer, plot)` and `left(viewer, plot)` on the server thread, in registration order: layout sync first, then the relay. A viewer who disconnects is forgotten without callbacks.
+- **Queries.** `StudioRange.viewersOf(server, studio)` (the players who see it now) and `StudioRange.sees(viewer, studio)`.
+- **What the two features do with it.**
+  - `entered`: MP-04 sends `LayoutS2C` if the studio has a layout. MP-06 then sends `PresenceS2C` and the studio's latest state, if it has one.
+  - `left`: MP-04 sends `LayoutRemoveS2C`. MP-06 sends nothing.
+  - In between, MP-04 sends a new or rebuilt layout, and MP-06 relays states, events and presence changes, to `viewersOf(studio)` only. States and events never go back to the owner.
+- **The client mirrors it.** `LayoutS2C`, `StudioStateS2C` and `PresenceS2C` each create the studio's view if it is missing, or update it (`Studios` upserts). `LayoutRemoveS2C` means "this studio left your range": the client calls `Anchors.remove(studio)` and `Studios.remove(studio)`, which drops the layout, the plot, the state and the presence together. Nothing else removes a remote view before disconnect. Offline presence does not remove it: the studio dims (D-MP02).
+
 ### Feature flag
 
 Multiplayer is on only when a dedicated server has `enabled: true` **and** the client received a matching-protocol `HelloS2C`. Singleplayer never takes a multiplayer code path except through `dev.mp.fake`. This is what keeps upstream merges cheap (the handoff's "behind a mode") and is the campaign's rollback lever: set `enabled: false` and restart the server.
@@ -161,37 +181,46 @@ Multiplayer is on only when a dedicated server has `enabled: true` **and** the c
 - **Logger:** `agentcraft.mp` (slf4j), through `main/mp/MpLog.java`. Every line is `event=<name>` followed by `key=value` pairs, never free text alone. Event and reason strings are constants in `MpEvents` / `MpReasons`.
 - **Correlators on every event that has them:** `player` (the acting player's UUID), `studio` (owner UUID), `plot` (index), `rev`.
 - **Refusals** carry a stable `reason=` from the packet's reason list. **State changes** carry before and after values.
-- **Guards:** `MpLog.capture()` is a JUnit test hook. Every event row below has a capture test in its packet. MP-F ships the test `catalog_covers_every_mp_event_in_the_sources`, which scans `mod/src` for `MpLog.event(` literals and fails on any event missing from `MpEvents`.
-- **Content rule:** no opt-in text, no Foreman free text and no repo or task names in any log line. Counts and ids only.
+- **Guards:** `MpLog.capture()` is a JUnit test hook. Every event row below has a capture test in its packet. MP-F ships the test `catalog_covers_every_mp_event_in_the_sources`, which scans `mod/src/main` and `mod/src/client` for `MpLog.event(` and fails on any event missing from `MpEvents`. It reads the first argument as text, so write it as `MpEvents.NAME` (no static import, no variable), and do not write `MpLog.event(` in a comment.
+- **Content rule:** no opt-in text, no Foreman free text and no repo or task names in any log line. Counts and ids only: a field value is a number, a boolean, an enum constant, a UUID or a constant from `MpReasons`, never a record, a collection or a string that came from a Foreman or from another player.
 
 | Event | Level | Packet | Fields beyond the correlators |
 |---|---|---|---|
-| `config_loaded` / `config_invalid` | info / warn | MP-F | `enabled`, `file`; `key`, `value` |
-| `hello_sent` / `hello_received` | info | MP-F | `protocol`, `plot`; `mode` |
+| `config_loaded` / `config_invalid` | info / warn | MP-F, MP-01 | `enabled`, `file` (`none` when there is no config file); `key`, `value`, and for MP-01's world check also `reason` (`surface_not_64`) |
+| `hello_sent` / `hello_received` | info | MP-F | `protocol`, `plot`; `mode`. A hello the client refuses is logged too, with the mode it stayed in |
 | `mode_changed` | info | MP-F | `from`, `to`, `server` (address hash, never the address) |
 | `fake_studio` | info | MP-F | `action` (`set`, `clear`), `agents` |
-| `world_rules_applied` / `creative_forced` | info | MP-01 | `rules`; `from_mode` |
-| `autoworld_skipped` | info | MP-01 | `reason` (`quickplay_multiplayer`, `disabled`) |
-| `plot_built` / `plot_build_failed` | info / error | MP-02 | `ms`, `changed`, `kept`; `reason` |
+| `world_rules_applied` / `creative_forced` | info | MP-01 | `rules` (the number of game rules set); `from_mode` |
+| `autoworld_skipped` | info | MP-01 | `reason` (`quickplay_multiplayer`, `multiplayer_screen`, `disabled`) |
+| `plot_built` / `plot_build_failed` | info / error | MP-02 | `ms`, `changed`, `kept`; `reason` (`no_plot`, `bad_origin`, `io_error`, `build_error`). Logged by the builder, and only for a studio other than `LOCAL` |
 | `plot_allocated` / `plot_allocation_failed` | info / error | MP-03 | `index`, `origin`; `reason` (`grid_full`, `io_error`) |
-| `plot_command` | info | MP-03 | `command`, `target_plot`, `ok` |
-| `layout_sent` / `layout_applied` / `layout_removed` | debug | MP-04 | `anchors`, `to` / `anchors` |
+| `plot_command` | info | MP-03 | `command`, `target_plot`, `ok`. A refused command is logged with `ok=false` and carries no `reason` |
+| `layout_sent` / `layout_applied` / `layout_removed` | debug | MP-04 | `anchors`, `to` (the viewer) / `anchors` / none. `layout_sent` is logged by the server, the other two by the client |
 | `public_state_sent` / `public_state_skipped` | debug | MP-05 | `agents`, `bytes`, `policy`; `reason` (`unchanged`, `rate_limited`, `not_multiplayer`) |
 | `policy_changed` | info | MP-05 | `before`, `after` (flag bits) |
-| `public_state_rejected` | warn | MP-06 | `reason` (`no_plot`, `rate_limited`, `bad_version`, `decode_failed`) |
+| `public_state_rejected` | warn | MP-06 | `reason` (`no_plot`, `rate_limited`, `bad_version`, `decode_failed`). `bad_version` means the sender has no accepted hello. `decode_failed` comes from MP-F's codec, before any handler, so it has no `player` |
+| `studio_event_rejected` | warn | MP-06 | `reason` (`no_plot`, `rate_limited`, `bad_version`, `unknown_agent`). `bad_version` means the sender has no accepted hello, as for `public_state_rejected` |
 | `relay_sent` | debug | MP-06 | `recipients`, `bytes` |
 | `presence` | info | MP-06 | `online` |
 | `remote_studio_added` / `remote_studio_removed` | info | MP-06 | `slot` |
-| `world_intent_applied` / `world_intent_rejected` | debug / warn | MP-07 | `changed`, `lamps`; `reason` (`no_plot`, `rate_limited`, `unknown_binding`) |
+| `world_intent_applied` / `world_intent_rejected` | debug / warn | MP-07 | `changed`, `lamps`; `reason` (`no_plot`, `rate_limited`, `unknown_binding`). `unknown_binding`: a block entity in the plot whose binding is not a legal lamp key (an old `ci:<repoId>`, for example) is skipped and logged once per plot, without the binding, which may hold a repo id. The rest of the intent is still applied |
 | `agents_studio_attached` / `agents_studio_detached` | debug | MP-08 | `slot`, `agents` |
-| `visitor_readonly` | debug | MP-11 | `station`, `action` |
-| `plot_edit_refused` | info | MP-13 | `action` (`break`, `place`, `use`), `pos` |
+| `visitor_readonly` | debug | MP-11 | `station` (one of a closed set of names the packet defines, `agent` for an agent card), `action` (`open`) |
+| `plot_edit_refused` | info | MP-13 | `action` (`break`, `place`, `use`), `pos`. No `reason`: there is one cause. At most one line per player, action and plot every 5 seconds |
 
 Close-out (MP-Z) adds any rows the worknotes introduce, through the coordinator.
 
 ## File-ownership matrix
 
 A packet edits only the files in its row. **(new)** files are created by that packet. "F-stub" means MP-F created the file empty (declared and wired), and the packet fills it in.
+
+**Every packet also owns its own new test files and its worknote**, whether or not its row names them:
+
+- JUnit tests under `mod/src/test/java/dev/agentcraft/mp/<area>/`, or in the package of the class under test when the test needs package-private access (for example `mod/src/test/java/dev/agentcraft/client/monitor/`);
+- game tests under `mod/src/gametest/java/dev/agentcraft/gametest/mp/<area>/`;
+- `<area>` is the packet's own directory name (`world`, `offset`, `plot`, `layout`, `publish`, `relay`, `intent`, `agents`, `display`, `station`, `visitor`, `dev`, `protect`). Simple class names are unique across packets (the game-test id has no package), so prefix them with the area.
+
+A packet never edits a test file or a fixture that MP-F or another packet created. If its change breaks one, it raises that with the coordinator. MP-F ships the fixtures for tests that need a `ForemanState`: `mod/src/test/java/dev/agentcraft/client/foreman/ForemanStates.java` (`showcase()` and `showcaseLate()`, built from two captured sim snapshots under `mod/src/test/resources/dev/agentcraft/fixtures/`). MP-05 and MP-07 use them.
 
 | Packet | Owned files | Must not touch |
 |---|---|---|
@@ -206,12 +235,12 @@ A packet edits only the files in its row. **(new)** files are created by that pa
 | **MP-05** Public-state publisher and redaction **(sec)** | `client/mp/publish/**` (`PublishFeature.java` F-stub; `Redactor.java`, `PolicyStore.java`, `PublishScheduler.java` new), JUnit tests under `mp/publish/` (new) | `ForemanState.java`, `Protocol.java` (listen only) |
 | **MP-06** Relay and presence **(sec)** | `main/mp/server/relay/**` (`RelayFeature.java` F-stub; `StudioRelay.java`, `RateLimiter.java` new), `client/mp/remote/RemoteStudiosFeature.java` (F-stub) | `Studios.java` (call its API) |
 | **MP-07** World intents **(sec)** | `client/hq/HqWorldDriver.java`, `client/world/ServerTasks.java`, `client/decisions/DecisionsFeature.java` (the `syncPodium` method only, A-18), `main/mp/server/intent/**` (`WorldIntentFeature.java` F-stub; `IntentApplier.java` new), JUnit and gametests (new) | `StatusLampRenderer.java`, `HqClientFeature.java` (MP-10), every other `decisions/` file |
-| **MP-08** Multi-studio agents | `client/agents/AgentManager.java`, `AgentsFeature.java`, `StationAssigner.java`, `AgentView.java`, `Nameplate.java`, `SpeechBubble.java`, `AgentLife.java`, `Seats.java`, `AgentSkins.java`, `client/agents/StudioAgents.java` (new) | `AgentCardScreen.java` (MP-11), `ClientAgentEntity.java` unless the coordinator agrees |
+| **MP-08** Multi-studio agents | `client/agents/AgentManager.java`, `AgentsFeature.java`, `StationAssigner.java`, `AgentView.java`, `Nameplate.java`, `SpeechBubble.java`, `AgentLife.java`, `Seats.java`, `AgentSkins.java`, `client/agents/StudioAgents.java` (new); `PlateLayout.java`, `PlateStack.java`, `AgentRenderer.java` and `AgentRenderState.java` for a studio-qualified plate key only | `AgentCardScreen.java` (MP-11), `ClientAgentEntity.java` unless the coordinator agrees |
 | **MP-09** Studio-aware displays | `client/monitor/**`, `client/taskwall/**` | `StationInteractions.java` (MP-11) |
 | **MP-10** Studio-aware stations | `client/decisions/DecisionPodiumRenderer.java`, `client/decisions/DecisionQueue.java`, `client/diff/MergeStationRenderer.java`, `client/library/MemoryArchiveRenderer.java`, `client/library/MemoryIndex.java`, `client/console/ConsoleTerminalRenderer.java`, `client/hq/StatusLampRenderer.java`, `client/hq/HqClientFeature.java` | `HqWorldDriver.java` (MP-07), `DecisionsFeature.java` (MP-07), screens |
 | **MP-11** Visitor interactions | `client/world/StationInteractions.java`, `client/agents/AgentCardScreen.java`, `client/mp/visitor/**` (`VisitorFeature.java` F-stub; read-only screens new) | every feature's own `*Feature.java` handler (the gate sits in front of them) |
 | **MP-12** DevBridge and dev tools in multiplayer | `client/dev/DevCommands.java`, `client/world/AnchorsDev.java`, `client/hq/HqCheck.java`, `client/dev/play/CameraPath.java`, `client/mp/dev/MpDevCommands.java` (new) | `client/mp/dev/MpDevFake.java` (MP-F's) |
-| **MP-13** Plot protection **(sec)** | `main/mp/server/protect/**` (`PlotProtectionFeature.java` F-stub), gametests (new) | `HqWorld.java` |
+| **MP-13** Plot protection **(sec)** | `main/mp/server/protect/**` (`PlotProtectionFeature.java` F-stub), gametests (new); one explosion mixin class in the common mixin package and its one line in `agentcraft.mixins.json` | `HqWorld.java` |
 | **MP-14** Deployment for multiplayer | `deploy/**`, `.github/workflows/release-container.yml`, `docs/multiplayer/deploy.md`, `docs/multiplayer/player-install.md` (new) | any mod or Foreman source; **never a colo address, hostname or credential** |
 | **MP-I** Integration | anything a seam needs, by coordinator assignment only | |
 | **MP-Z** Close-out | `README.md`, `CLAUDE.md`, `mod/DEV.md`, `mod/FEATURES.md`, `docs/QA.md`, `docs/multiplayer/**`, `config` defaults (`enabled`) | code, except one-line fixes the coordinator assigns |
@@ -247,12 +276,12 @@ Wave 2  MP-I Integration: dedicated server + 2 clients + 2 sim Foremen, end to e
 Wave 3  MP-Z Close-out: docs, enabled-by-default in the shipped server config, owner UAT, colo deploy (owner-confirmed)
 ```
 
-**No Wave-1 packet depends on another Wave-1 packet to build or to verify.** Where two meet at runtime, they meet through an MP-F contract, and each side verifies against MP-F's default or fake:
+**No Wave-1 packet depends on another Wave-1 packet to build, or to verify in JUnit and game tests.** Four harness checks need MP-03's plot registry (see the MP-03 row). Where two meet at runtime, they meet through an MP-F contract, and each side verifies against MP-F's default or fake:
 
 | Runtime meeting point | How each side verifies alone |
 |---|---|
 | MP-02 (honours `origin`) ↔ MP-03 (allocates plots, calls the builder with an origin) | MP-02 gametests build at plot 1's origin directly. MP-03 tests allocation and lifecycle at plot 0 plus the persisted origin of plot 1. They meet in MP-I. Merge MP-02 first. |
-| MP-03 (real `PlotDirectory`) ↔ MP-04 / MP-06 / MP-07 / MP-13 (consult it) | They code against `Plots.directory()`. With MP-F's singleplayer directory, the harness's first player is the owner of plot 0. Their multi-plot cases are unit tests against a fake `PlotDirectory`. |
+| MP-03 (real `PlotDirectory`) ↔ MP-04 / MP-06 / MP-07 / MP-13 (consult it) | They code against `Plots.directory()`. MP-F's default directory gives no connected player a plot: plot 0 belongs to `LOCAL`, and `HelloS2C.plotIndex` is −1 until MP-03 allocates. Owner-gated paths and multi-plot cases are verified in JUnit and game tests against a fake `PlotDirectory`, installed with `Plots.install` and restored in the same call. The harness checks of MP-04, MP-06, MP-07 and MP-12 that need an owned plot run once MP-03 is merged (merge MP-03 first among these), otherwise in MP-I. |
 | MP-04 (layouts reach clients) ↔ MP-08 / 09 / 10 / 11 (need layouts) | The renderer packets use `dev.mp.fake {overlay}`, which reuses the singleplayer layout. |
 | MP-05 (owner publishes) ↔ MP-06 (server relays) | MP-06 tests with `PublicStateC2S` sent by a test client (the harness's `tools/lib/mp` can send any payload through `dev.mp.*` once MP-12 lands; until then, gametests and JUnit). MP-05 tests the Redactor in JUnit and the send path against the MP-F codec round trip. |
 | MP-07 client (intents) ↔ MP-07 server (applier) | The same packet, by design (one authority boundary, one reviewer). |
@@ -277,7 +306,7 @@ Tests:
 
 - **Unit (JUnit, new in this packet):**
   - every payload's codec round-trips;
-  - every cap is enforced (17 agents, a 49-char anchor name and a 121-char opt-in text are each refused at decode);
+  - every cap is enforced (17 agents, a 49-char anchor name and a 121-char opt-in text are each refused at decode and where the record is built);
   - sanitization strips `§` and control characters;
   - `PlotGrid` spiral: indexes 0..200 give distinct origins, 16-aligned, with no overlapping boxes at stride 128, and `indexAt(originOf(i)) == i`;
   - `Anchors.Builder.origin` offsets every anchor and the bounds;
@@ -317,15 +346,24 @@ Tests: `npm test --prefix tools` for the port math, pid-record handling and summ
 
 **Status: BlockedDependency (MP-F).**
 
-- `HqWorld`: on a dedicated server with `enabled: true`, the HQ rules apply by config instead of by level name (A-36).
-  - The world-wide game rules apply when `worldRules`, and creative forcing when `forceCreative`.
-  - `LOG_ADMIN_COMMANDS` is **left on** in multiplayer (op commands stay auditable on a shared server).
-  - `setworldspawn 0 65 0` stays singleplayer-only.
-  - Singleplayer behaviour is byte-for-byte unchanged.
-- `AutoWorld`: skip when the client was launched with a quick-play multiplayer argument, or when the player opens the multiplayer screen first (log `autoworld_skipped`). The existing env switch still works (A-39).
-- The server's world type: document in the worknote and in MP-14's config that a multiplayer world must be superflat with the grass top at y = 64 (A-32), and fail loudly at startup (`config_invalid`, `reason=surface_not_64`) if plot 0's surface is not 64.
+"Multiplayer" below means `server.isDedicatedServer() && MpServerConfig.current().enabled()`, read at call time.
 
-Tests: a gametest that the rules apply with `enabled: true` on a non-HQ level name, and creative forcing honours the flag. A unit test for the quick-play detection. Singleplayer QA compare.
+- `HqWorld`: in multiplayer the HQ rules apply by config instead of by level name (A-36).
+  - **`HqWorld.isHq(server)` is false in multiplayer**, whatever the level name. Its three callers are the legacy level-name paths: `HqWorld`'s own rules, `Anchors`' load of the `LOCAL` layout, and `HqFeature`'s auto-build at the origin. None of them runs in multiplayer; plots, their layouts and their builds belong to MP-03. The deployed server keeps `level-name=AgentCraft HQ`, so without this an enabled server would build and publish a `LOCAL` studio at the origin.
+  - With `enabled: false`, and in singleplayer, today's code path runs unchanged (level-name gate, every rule, the first-start block, creative on join). This is the rollback lever.
+  - `worldRules`: the same world-wide game rules as today, except `LOG_ADMIN_COMMANDS`, which is set to **true** (op commands stay auditable on a shared server). On the first start of a world the time is set and the weather cleared, as in singleplayer, and the marker file is written. `setworldspawn` is **not** run: the world spawn is not moved in multiplayer (MP-03 sets each player's respawn point).
+  - `forceCreative`: a joining player in survival or spectator is switched to creative, as today. With the flag off nobody is switched.
+  - Singleplayer behaviour is byte-for-byte unchanged.
+- `AutoWorld` skips, for the whole client session, in three cases, and logs `autoworld_skipped` once with the reason:
+  - `disabled`: the existing env switch (A-39);
+  - `quickplay_multiplayer`: the client was launched with `--quickPlayMultiplayer`. Read the launch arguments through Fabric Loader (`FabricLoader.getLaunchArguments(true)`), never log them, and keep the parser a pure function;
+  - `multiplayer_screen`: a multiplayer screen (the server list or a connect screen) is open before AutoWorld has opened the HQ world, for example after a failed quick-play connection. The deferred open re-checks this.
+- The server's world type: a multiplayer world must be superflat with the grass top at y = 64 (A-32). Document it in the worknote and in MP-14's config.
+  - `ServerWorldFeature` checks it at `SERVER_STARTED` in multiplayer, from the overworld generator's settings (a `FlatLevelSource` whose top layer is grass at y = 64), not from blocks: a built plot or an unloaded chunk would make a block probe lie.
+  - On failure it logs `config_invalid key=world.surface value=<not_flat | top_y_<n> | top_not_grass> reason=surface_not_64` and then refuses to start: it throws, so the server stops before any rule is applied, any plot is built or any player joins. `ServerWorldFeature.init()` is wired first, so its listener runs before every other feature's.
+  - The game-test server is not multiplayer by default (its world is sandstone at y = 3), so the check does not run there. A game test calls the check's pure function directly.
+
+Tests: a gametest that the rules apply with `enabled: true` on a non-HQ level name, that `LOG_ADMIN_COMMANDS` ends up true, that `worldRules: false` changes nothing, and that creative forcing honours the flag. Unit tests for the quick-play detection and for the surface rule. Singleplayer QA compare.
 
 ## MP-02: build at an offset
 
@@ -335,6 +373,14 @@ Tests: a gametest that the rules apply with `enabled: true` on a non-HQ level na
 - `StudioHqBuilder` passes `options.origin()` to `Plan` and to `Anchors.Builder.origin` and touches no geometry.
 - `PlanStore` keys its file by plot (`agentcraft/plots/<index>/hq-plan.dat`; `LOCAL` keeps `agentcraft-hq-plan.dat`), and `invalidateUnless` becomes per plot (A-35).
 - Origins must be 16-aligned (assert).
+
+Decisions:
+
+- **The plot index comes from the directory.** `PlanStore` resolves `Plots.directory().plotOf(options.studio())`. `LOCAL` keeps `agentcraft-hq-plan.dat`. Any other studio needs a plot whose origin equals `options.origin()`: no plot fails with `no_plot`, a different origin with `bad_origin`. The path is built from the integer index only.
+- **Alignment:** x and z are multiples of 16 (otherwise `bad_origin`). y is translated as given; plots use y = 0.
+- **`invalidateUnless`:** the existing `(server, builderId)` form keeps acting on `LOCAL`, so `HqFeature` compiles unchanged. MP-02 adds the per-plot form and MP-03 moves `HqFeature` to it.
+- **Telemetry:** the builder logs `plot_built` and `plot_build_failed` itself, only for a studio other than `LOCAL` (singleplayer stays silent). An exception from the build is logged as `build_error` and rethrown.
+- The game test installs a fake `PlotDirectory` with `Plots.install` and restores it in the same call. It builds at plots 1 and 2 and never force-rebuilds plot 0, which other packets' tests share.
 
 Tests (gametest):
 
@@ -364,6 +410,17 @@ Timing must stay in A-07's range. Singleplayer QA compare.
   - `plot list` / `plot assign <player> <index>` / `plot free <index>` (ops).
 - `/agentcraft hq` in multiplayer builds the caller's own plot, not the origin.
 
+Decisions:
+
+- **Allocation starts at index 0** and happens in `ServerPlayConnectionEvents.INIT`, which Fabric fires before `JOIN`. MP-F sends the hello on `JOIN`, so the hello already carries the index. Only the registry entry is made there: the build is queued on the server thread, one plot per tick, never inside the join.
+- **In multiplayer `HqWorld.isHq` is false (MP-01)**, so the legacy auto-build at the origin and the `LOCAL` anchor load do not run. MP-03 owns building and loading there. Until MP-02 is merged the builder ignores `origin`: test with plot 0 only.
+- **`plot rebuild [index] [force]`:** without an index it rebuilds the caller's own plot. The index is for ops.
+- **`plot assign <player> <index>`:** the player is online, or a name the server's profile cache knows. It is refused when the player already has a plot or the index is taken. **`plot free <index>`** removes the registry entry, unpublishes the layout (`Anchors.remove`) and deletes that plot's directory (anchors and plan), so a later owner gets a clean build. The blocks stay. A freed owner gets a new plot on their next join when `autoAllocate` is on.
+- After every allocation, assignment or free, call `StudioRange.refresh(server)`.
+- **The command root opens.** `plot info` and `plot home` are for everyone, so `/agentcraft` itself loses its gamemaster requirement, and `hq`, `anchors` and the op-only plot commands each carry it. The acting player is always the command source's player, never an argument, except for the op commands above.
+- **Persistence** uses `Anchors.toJson` and `Anchors.fromJson` (both public), so there is one layout format. `plots.json` holds UUIDs, indexes and origins only. A persisted index is validated before it becomes part of a path.
+- `plot_built` and `plot_build_failed` are MP-02's, logged by the builder. MP-03 logs `plot_allocated`, `plot_allocation_failed` and `plot_command`.
+
 Tests: gametests for allocation order, persistence round-trip across a restart, the spawn anchor, owner-vs-op permissions on every command, and a double-join not double-allocating. Unit tests against `PlotGrid`.
 
 ## MP-04: layout sync
@@ -373,7 +430,13 @@ Tests: gametests for allocation order, persistence round-trip across a restart, 
 - **Server:** after `HelloS2C`, send `LayoutS2C` for the player's own plot plus every plot within `relayRadiusChunks` of the player, and re-send on publish and rebuild. Send `LayoutRemoveS2C` when a plot leaves range (track per player, check on a cheap interval).
 - **Client:** apply into `Anchors.publish(studio, layout)` and `Anchors.setSelf(you)`. `Studios` sees new studios through MP-F's listener.
 
-Tests: unit tests for the in-range set computation. Harness: client A's `dev.anchors` shows its plot's 69 anchors offset by its origin. When client B walks into range, B receives A's layout, and walking away removes it. Telemetry rows.
+Decisions:
+
+- **Range comes from `StudioRange`** (see "Who sees which studio"). MP-04 keeps no range set of its own: it registers a listener, sends `LayoutS2C` on `entered` when the studio has a layout and `LayoutRemoveS2C` on `left`, and sends a newly published or rebuilt layout to `StudioRange.viewersOf(studio)`. A removed layout (`Anchors.remove`) is sent as `LayoutRemoveS2C` to the same viewers.
+- **Client:** on `LayoutS2C`, `Anchors.publish(studio, layout)` and `Studios.setPlot(studio, plotIndex, stride)` with the stride from `MpMode.serverInfo()`. On `LayoutRemoveS2C`, `Anchors.remove(studio)` and `Studios.remove(studio)`. MP-04 does not call `Anchors.setSelf`: MP-F's hello handler already has.
+- The unit tests cover what MP-04 decides (which layout goes to whom, and when), not the range rule, which MP-F tests.
+
+Tests: unit tests for the in-range set computation. Harness (needs MP-03's registry: once MP-03 is merged, otherwise in MP-I): client A's `dev.anchors` shows its plot's 69 anchors offset by its origin. When client B walks into range, B receives A's layout, and walking away removes it. Telemetry rows.
 
 ## MP-05: public-state publisher and redaction (sec)
 
@@ -383,7 +446,14 @@ Tests: unit tests for the in-range set computation. Harness: client A's `dev.anc
   - `awaitingUser` is computed from open decisions and task assignee exactly as `AgentManager` does today (A-25), so no decision or task leaves the machine.
   - Repo CI is reduced to slot indexes.
   - Opt-in fields are filled only when their flag is on.
-- **`PublishScheduler`:** send on a ForemanState revision change, coalesced to at most `publicStatePerSecond` (from `HelloS2C`'s `ServerInfo`), and skip unchanged states. Also: re-send on reconnect, `foremanOnline=false` while the Foreman link is down, say and task-done events as `StudioEventC2S` (text only when `sayText`).
+- **`PublishScheduler`:** send on a ForemanState revision change, coalesced to at most `publicStatePerSecond` (from `MpMode.serverInfo()`), and skip unchanged states. Also: re-send on reconnect, `foremanOnline=false` while the Foreman link is down, say and task-done events as `StudioEventC2S` (text only when `sayText`).
+- **Decisions:**
+  - `rev` is the scheduler's own counter, starting at 1 for each connection and stamped when a state is sent. The `Redactor` stays pure and leaves it 0. "Unchanged" compares the content without `rev`. Nobody compares revs on receipt: the latest state wins.
+  - A protocol value the wire cannot carry is mapped, never sent: agent state `UNKNOWN` to `idle`, station `UNKNOWN` to `desk`, goal status `UNKNOWN` and "no goal" to `none` (progress 0, no text). A task whose status is `UNKNOWN` is left out of `tasks` and of `counts`.
+  - `counts.openDecisions` is every open decision, merges included. `counts.openMerges` is the merge subset.
+  - Every string is cut to its cap and sanitized by the `Redactor`, and a blank opt-in text becomes `null`: the codec refuses rather than trims, and a refused state disconnects the owner. A record over a cap, or an agent whose id or skin is not an identifier path, throws where the `Redactor` builds it, so it leaves such an agent out and replaces such a skin.
+  - Events are sent as they happen, at most `publicStatePerSecond` per second; the excess is dropped. `Say.text` is `null` unless `sayText` is on. `Say.length` is always sent.
+  - The publisher only sends. It never writes the public projection into `Studios` for the owner's own id.
 - **`PolicyStore`:** the owner's flags, persisted client-side (`<gameDir>/config/agentcraft-public.json`), all false by default (D-MP01). There is a `/agentcraft-public` client command or console command to view and toggle them (UI polish is MP-Z's).
 
 Tests (JUnit):
@@ -400,7 +470,17 @@ Tests (JUnit):
 - **Server:** accept `PublicStateC2S` only from a player who owns a plot, and attribute it to the connection's player, never to a payload field. Enforce `publicStatePerSecond` per player and refuse with telemetry. Store the latest state per studio, and relay `StudioStateS2C` to mod-equipped players within `relayRadiusChunks` of the studio's plot (on change, and to a player entering range). Relay events the same way. Send `PresenceS2C` on join and leave. When the owner leaves, relay `foremanOnline=false`, so agents dim (D-MP02).
 - **Client (`RemoteStudiosFeature`):** apply `StudioStateS2C` / `PresenceS2C` / events into `Studios` (add or update or remove remote views, events to listeners). Ignore any state for the own studio id.
 
-Tests: unit tests for the rate limiter and range set. Gametests: a non-owner's state is refused, and a state is attributed to the sender, not to a forged id. Harness: A's agents' states appear in B's `dev.mp.studios` within 1 s, and A disconnecting turns them offline on B.
+Decisions:
+
+- **Range comes from `StudioRange`** (see "Who sees which studio"). The relay keeps no range set of its own. On `entered` it sends `PresenceS2C` and the studio's latest state. It relays to `StudioRange.viewersOf(studio)`, minus the owner.
+- **A remote view is removed only by MP-04's `LayoutRemoveS2C`.** MP-06 sends no removal. `RemoteStudiosFeature` logs `remote_studio_added` and `remote_studio_removed` from a `Studios` listener.
+- **Refusals.** A state from a player with no accepted hello is `bad_version`, from a player with no plot `no_plot`, over the rate `rate_limited`. `decode_failed` is logged by MP-F's codec. A refused state is not stored.
+- **Events:** their own bucket at `publicStatePerSecond` (see "Rates"). An event is refused with `studio_event_rejected` when the sender has no accepted hello (`bad_version`), has no plot, is over the rate, or names an agent that is not in the studio's latest state. When that state's `policy.sayText` is off, the relay clears `Say.text` before sending it on.
+- **Presence** goes to the studio's viewers, not to everyone: on `entered`, and when the owner joins or leaves. `ownerName` is the owner's player name, or empty when the server does not know it. When the owner leaves, the stored state is kept with `foremanOnline=false` and relayed once.
+- **The "forged id" game test** proves attribution: `StudioStateS2C.studio` is the connection's player even when the ids inside the state look like another studio's. The payload has no studio field to forge.
+- The handlers take the sender's UUID and the state as plain arguments, so JUnit can drive every refusal without a connection.
+
+Tests: unit tests for the rate limiter and range set. Gametests: a non-owner's state is refused, and a state is attributed to the sender, not to a forged id. Harness (needs MP-03's registry: once MP-03 is merged, otherwise in MP-I): A's agents' states appear in B's `dev.mp.studios` within 1 s, and A disconnecting turns them offline on B.
 
 ## MP-07: world intents (sec)
 
@@ -410,6 +490,9 @@ Tests: unit tests for the rate limiter and range set. Gametests: a non-owner's s
   - The singleplayer applier keeps today's `ServerTasks` path, so behaviour is unchanged (A-16, A-17).
   - The multiplayer applier sends `WorldIntentC2S` (the snapshot), on change and every 40 ticks as today.
   - `DecisionsFeature.syncPodium` goes through the same intent (`podiumOpen`) and no longer leaves a pending entry when nothing applies it (A-18).
+  - **Decision:** `compute` stays pure. `syncPodium` no longer writes to the world: it sets the driver's podium override (open, closed or none), and the driver applies `compute(...)` with `podiumOpen` replaced by the override while one is set, through the same applier as everything else and on the same tick as today. So the podium still closes at once while the player is answering, in singleplayer and in multiplayer.
+  - **Decision:** sends are coalesced to at most `intentsPerSecond` (from `MpMode.serverInfo()`), on change, plus the resync every 40 ticks.
+  - **Decision (server):** an illegal key never reaches the applier, because the codec refuses it. What can still be unknown is a block entity in the plot whose own binding is not a legal lamp key. The applier skips that block, applies the rest, and logs `unknown_binding` once per plot, never with the binding text. A legal key that no block entity carries is simply unused.
 - **Server (`IntentApplier`):**
   - Resolve the sender's own plot only (no plot means refused).
   - Within that plot's box, set the lamp `STATUS` by each block entity's binding, podium `OPEN`, merge `ACTIVE`, monitor `LIT` by binding, and the copper bulbs near the podium and merge anchors, the way `HqWorldDriver.apply` does today.
@@ -418,12 +501,12 @@ Tests: unit tests for the rate limiter and range set. Gametests: a non-owner's s
 
 Tests:
 
-- JUnit: `compute` on the showcase and showcase-late states equals what today's driver applies. Capture today's results first, as a golden file, on the MP-F baseline.
+- JUnit: `compute` on the showcase and showcase-late states equals what today's driver applies, with the `ci:<repoId>` keys removed: `compute` emits `ci:#1` to `ci:#8` only. Capture today's results first, as a golden file, on the MP-F baseline. A test that the encoded showcase intent contains no repo id.
 - Gametests:
   - an intent changes only blocks in the sender's plot;
   - a forged intent for another plot changes nothing;
   - rate limiting works.
-- Harness: A's lamps change in the world, and B sees them change.
+- Harness (needs MP-03's registry: once MP-03 is merged, otherwise in MP-I): A's lamps change in the world, and B sees them change.
 - Singleplayer QA compare: lamps, podium and merge station unchanged.
 
 ## MP-08: multi-studio agents
@@ -436,6 +519,12 @@ Tests:
 - **Remote nameplates:** show the state word instead of activity unless the state carries `activity` (opt-in). Remote say bubbles show "…" with the same timing unless `text` is present.
 - **Viewer-relative fixes (A-29):** a remote studio's agent in `waiting_user` walks to its **owner** if the owner's player entity is loaded and inside the plot, otherwise to that studio's `podium_user` spot, and never to the viewer. A bubble addressed to "user" is labelled with the studio's owner name.
 - **Offline:** `foremanOnline=false` or presence offline shows the existing dimmed "Foreman offline" plate (A-25).
+
+Decisions:
+
+- **Plates are keyed per studio.** Agent ids are cast ids, so two studios share them. `PlateLayout` and `PlateStack` key their tracks by studio and agent, not by agent id alone.
+- **`dev.mp.fake` with the overlay on replaces** the own studio's agents with the fake studio's (decide by what `Studios.at` returns for the own studio's area). With `overlay: false` both sets exist in the same building: use that for the 12-agent measurement.
+- **A click on a remote studio's agent never opens the own agent card** (it has message and pause controls for your own Foreman). `AgentsFeature` calls `RemoteAgentClicks.fire(studio, agentId)` instead, a foundation seam that does nothing until MP-11 registers its read-only card.
 
 Tests: JUnit for the per-studio id ranges and for awaiting-target selection. In game, with `dev.mp.fake {overlay}` and a showcase-shaped public state:
 
@@ -459,6 +548,12 @@ The own studio renders exactly as today. Keep the remote rendering cheap: no log
 
 Tests: JUnit for the remote view models from a `PublicStudioState`. In game with `dev.mp.fake {overlay}`: monitor and task wall shots, plus a check that **no** string from the singleplayer Foreman's state appears on a remote display (feed the overlay a state whose names differ). Singleplayer QA compare (`qa03_task_wall`, `qa04_agent_desk`).
 
+Decisions:
+
+- **The remote wall keeps four lanes.** A blocked public task sits in the Todo lane, and the Todo header shows the red "N blocked" count from `Counts.blocked`, as the own wall does.
+- **`StationRenderer`'s base extract** reads the own state's revision counter into `foremanRevision` for every station. That read stays (the file is shared). A remote renderer does not use `foremanRevision`: it keys its caches on the remote state's `rev`.
+- **`Studios.at` empty while in multiplayer** takes today's own path, as the renderer rule says. MP-I checks the window before a layout arrives.
+
 ## MP-10: studio-aware stations (podium, merge station, archive, console terminal, lamp hologram)
 
 **Status: BlockedDependency (MP-F).** Verify with `dev.mp.fake`.
@@ -475,6 +570,12 @@ Remote looks, from `PublicStudioState` only:
 
 Tests: JUnit view models. In-game overlay shots of each station. The same "no own-Foreman string leaks into a remote station" check as MP-09. Singleplayer QA compare (`qa05`-`qa08`-style shots).
 
+Decisions:
+
+- Under the singleplayer overlay the lamp, podium and merge **block states** stay the viewer's own (the singleplayer driver still runs). Verify the remote stations by their text and holograms, and note the caveat in the worknote. On a dedicated server the applier is the only writer.
+- Station text stays plain literals, like every station today: no lang keys, no edit to `en_us.json`.
+- The decision podium's cache is keyed on the remote state's `rev` for a remote studio, not on `foremanRevision`.
+
 ## MP-11: visitor interactions
 
 **Status: BlockedDependency (MP-F).** Verify with `dev.mp.fake`.
@@ -484,6 +585,12 @@ Tests: JUnit view models. In-game overlay shots of each station. The same "no ow
 - **The own-studio console key (`)** keeps working anywhere in the world and always talks to your own Foreman. Decisions (`J`) always answer your own.
 
 Tests: JUnit for the gate's routing table. In game with the overlay: clicking each station and an agent opens the read-only panel, and `dev.foreman` shows no message was sent. Singleplayer: every station still opens its real screen.
+
+Decisions:
+
+- `visitor_readonly` is logged for stations and for agent cards (`station=agent`), with `action=open`. The station names are a closed set of constants in the packet's own feature class.
+- **The remote agent card** is opened through the foundation seam: `VisitorFeature.init()` registers it with `RemoteAgentClicks.set(...)`. MP-11 does not edit `AgentsFeature` (MP-08's), and MP-08 does not open any card for a remote agent.
+- Screen text uses whatever the neighbouring screens use. Lang keys (`mp.visitor.*`) only where that screen already uses translatable components.
 
 ## MP-12: DevBridge and dev tools in multiplayer
 
@@ -497,7 +604,14 @@ Tests: JUnit for the gate's routing table. In game with the overlay: clicking ea
 - `AnchorsDev`, `HqCheck` and `CameraPath`: take an optional `studio` (default own) and resolve anchors through `Anchors.forStudio`.
 - `MpDevCommands` (new): `dev.mp.send {payload}` sends any C2S payload through the real codec (for MP-06's and MP-I's tests), and `dev.mp.relay` shows the client's last received states and events.
 
-Tests: on the harness, `dev.camera {anchor:"cam_room"}` lands on client A's own plot camera, and `dev.screenshot` works on both clients. Singleplayer DevBridge behaviour is unchanged (run `tools/test`, plus a QA compare).
+Tests: on the harness, `dev.camera {anchor:"cam_room"}` lands on client A's own plot camera (needs MP-03's registry: once MP-03 is merged, otherwise in MP-I), and `dev.screenshot` works on both clients. Singleplayer DevBridge behaviour is unchanged (run `tools/test`, plus a QA compare).
+
+Decisions:
+
+- **`dev.mp.send`** takes one flat request: `{payload: "public_state", state: {…}}`, `{payload: "studio_event", event: {…}}`, `{payload: "world_intent", intent: {…}}` or `{payload: "hello", protocol, modVersion}`. The JSON goes through `PublicJson` and the real codec, so a malformed payload is refused on the client with the codec's own message.
+- **A dev command names a studio by its UUID string**, as `dev.mp.studios` prints it. Absent or `"own"` means `Anchors.self()`.
+- **`CameraPath`** reads the optional `studio` from the camera JSON itself, so `PlayCommands` (outside the row) does not change.
+- JUnit for the pure parts (request parsing, studio resolution). The rest is checked on the harness.
 
 ## MP-13: plot protection (sec)
 
@@ -508,6 +622,13 @@ Tests: on the harness, `dev.camera {anchor:"cam_room"}` lands on client A's own 
 - Between plots (outside every box) is open ground.
 
 Tests: gametests per action (owner allowed, visitor refused, op allowed, outside-box allowed), with telemetry.
+
+Decisions:
+
+- **`protectPlots` ships on** (D-MP05, the default MP-F froze). The owner can turn it off in the server config.
+- **Explosions never change a block inside a plot**, whoever caused them: the cause of an explosion cannot be attributed reliably, so there is no owner exception. Fabric has no explosion event, so this is the one mixin the packet may add: it removes the positions inside any plot from the blocks an explosion is about to change. Blocks outside every plot are affected as usual.
+- **The owner test** is `Plots.directory().plotAt(pos)` and the acting player's UUID from the event, never anything a client sent. An op (gamemaster permission) passes. A position in no plot is open ground.
+- The telemetry capture is asserted in the game tests (`MpLog.capture()` works there too).
 
 ## MP-14: deployment for multiplayer
 
@@ -536,6 +657,15 @@ What remains for multiplayer:
 **Never commit the colo's address, hostname, SSH alias or credentials; `.env` is gitignored.**
 
 Tests: the release workflow's smoke test, extended as above, plus a harness client (MP-H) joining a locally run image and receiving `HelloS2C`.
+
+Decisions (they replace the text above where the two differ):
+
+- **The level name stays `AgentCraft HQ`.** It is the world folder of a server that already exists, and with MP-01 it no longer decides anything in multiplayer.
+- **The shipped config keeps `enabled: false`.** The colo updates itself from `latest-prerelease`, so a release must not switch the live server to multiplayer. MP-Z flips it with the owner. The smoke test mounts its own config with `enabled: true` for the multiplayer checks.
+- **The image smoke test has no client**, so it proves `config_loaded enabled=true` (and `world_rules_applied` once MP-01 is in), not the hello. The hello is proven on the MP-H harness against the source-built server, and on the real image in MP-Z's owner UAT.
+- **Plot allocation is not in the image smoke test.** The smoke test checks that the plot commands answer over RCON once MP-03 is in. Allocation is checked on the harness and in MP-I.
+- **The image build runs `gradlew build -x runGameTest`:** JUnit still runs, and the game tests stay in CI, which runs them on every pull request and on `main`.
+- **No Docker on the owner's machine** (CLAUDE.md). "A locally run image" becomes the image on the colo, which needs the owner's confirmation and belongs to MP-Z. MP-14 itself changes files and documentation only and is verified by the release workflow's own run.
 
 ## MP-I: integration
 
