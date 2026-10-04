@@ -4,17 +4,22 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.client.mp.Studios;
+import dev.agentcraft.client.mp.StudioView;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.*;
 import dev.agentcraft.mp.net.*;
 import java.util.*;
+import java.util.concurrent.Executor;
 import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 class LayoutSyncClientTest {
+    private boolean bridged;
+
     @AfterEach
     void reset() {
+        bridged = false;
         MpMode.disconnected();
         Studios.reset();
         Anchors.publish(Anchors.Layout.EMPTY);
@@ -25,6 +30,17 @@ class LayoutSyncClientTest {
         var hello = new HelloS2C(MpProtocol.VERSION, own, 1, new ServerInfo(128, 12, 4, 10));
         MpMode.joined(false, MpMode.hashServer("layout-sync.test:25604"));
         assertTrue(MpMode.receiveHello(hello, false, player));
+    }
+
+    /**
+     * Registers the listener {@code Studios.init} registers. {@code Studios.init} itself hands the work to
+     * {@code Minecraft.getInstance()}, which is null without a running client, so {@code client} stands in:
+     * {@code Runnable::run} is what the Minecraft executor does for a caller already on the client thread.
+     * Neither registry can drop a listener, so this one goes quiet when the test ends.
+     */
+    private void bridgeAnchorsToStudios(Executor client) {
+        bridged = true;
+        Anchors.addStudioListener((studio, layout) -> { if (bridged) Studios.anchorsChanged(client, studio, layout); });
     }
 
     private static LayoutS2C samplePayload(StudioId remote) {
@@ -66,7 +82,9 @@ class LayoutSyncClientTest {
         UUID player = UUID.randomUUID();
         StudioId remote = StudioId.of(UUID.randomUUID());
         enterMultiplayer(player);
+        bridgeAnchorsToStudios(Runnable::run);
         LayoutSyncClient.apply(samplePayload(remote));
+        assertTrue(Studios.view(remote).isPresent());
         try (var capture = MpLog.capture()) {
             LayoutSyncClient.remove(new LayoutRemoveS2C(remote));
             assertTrue(Anchors.forStudio(remote).isEmpty());
@@ -74,6 +92,30 @@ class LayoutSyncClientTest {
             assertTrue(Studios.view(remote).isEmpty());
             assertEquals(1, capture.lines().stream().filter(l -> l.contains(MpEvents.LAYOUT_REMOVED)).count());
         }
+    }
+
+    @Test
+    void remove_notifies_studio_listeners_exactly_once() {
+        UUID player = UUID.randomUUID();
+        StudioId remote = StudioId.of(UUID.randomUUID());
+        enterMultiplayer(player);
+        bridgeAnchorsToStudios(Runnable::run);
+        List<StudioView> updates = new ArrayList<>();
+        List<StudioId> removals = new ArrayList<>();
+        Studios.addListener((id, view) -> {
+            if (!bridged) return;
+            if (view == null) removals.add(id); else updates.add(view);
+        });
+        var payload = samplePayload(remote);
+        LayoutSyncClient.apply(payload);
+        assertEquals(1, updates.size());
+        assertEquals(payload.layout(), updates.getFirst().layout());
+        assertTrue(removals.isEmpty());
+        LayoutSyncClient.remove(new LayoutRemoveS2C(remote));
+        assertEquals(List.of(remote), removals);
+        assertEquals(1, updates.size());
+        assertTrue(Studios.view(remote).isEmpty());
+        assertTrue(Studios.plot(remote).isEmpty());
     }
 
     @Test

@@ -36,8 +36,9 @@ public final class LayoutSyncClient {
     static void remove(LayoutRemoveS2C payload) {
         if (MpMode.current() != MpMode.MULTIPLAYER) return;
         StudioId studio = payload.studio();
+        // The listener Studios.init registers on Anchors drops the view and the plot, inline because this
+        // is the client thread. A direct Studios.remove here would notify the studio listeners twice.
         Anchors.remove(studio);
-        Studios.remove(studio);
         logLayoutRemoved(studio);
     }
 
