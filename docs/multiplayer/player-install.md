@@ -37,6 +37,14 @@ server jar and your client jar must match.
    among the loaded Fabric mods. On launch the mod opens (and on first launch creates) a local
    singleplayer world named "AgentCraft HQ". That is expected: it is your own studio for
    singleplayer use.
+4. **Turn the developer bridge off.** Add `-Dagentcraft.dev=0` to the profile's JVM arguments
+   (in the launcher: Installations, edit the profile, More options, JVM arguments), or set the
+   environment variable `AGENTCRAFT_DEV=0` for the game. The DevBridge is a control socket on
+   `127.0.0.1` that the project's own tools use for screenshots, the camera and commands. It is
+   on by default, a player does not need it, and any program on your machine that reaches it
+   can drive your game. Its commands that act on a remote server also need
+   `AGENTCRAFT_DEV_REMOTE=1`, which only the test harness sets: never set that for a client you
+   play with on a shared server.
 
 ## Run your own Foreman
 
