@@ -20,13 +20,14 @@ import dev.agentcraft.mp.state.PublicStudioState;
 import dev.agentcraft.mp.state.PublicTask;
 import dev.agentcraft.mp.state.StationWire;
 import dev.agentcraft.mp.state.TaskStatusWire;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
-/** MP-11: the pure visitor routing table, the public-only copy and the telemetry capture. */
+/** MP-11: the pure visitor routing table, the public-only copy, the panel fit and the telemetry capture. */
 class VisitorGateTest {
 	private static StudioView own() {
 		return new StudioView(StudioId.LOCAL, true, "", true, Anchors.Layout.EMPTY, null, 0);
@@ -102,6 +103,57 @@ class VisitorGateTest {
 		assertFalse(countsOnly.contains("SECRET-TASK"));
 		assertTrue(countsOnly.contains("Todo 1"));
 		assertFalse(String.join("\n", VisitorGate.stationLines(null, Station.PODIUM)).contains("SECRET"));
+	}
+
+	// The panel's fixed part with the paper panel's padding (8 + 14 + 16 + 12 + 12 + 9) and its row
+	// height; 262 is a 960x540 window at GUI scale 2 (270 high) less the 4 px margins.
+	private static final int CHROME = 71;
+	private static final int ROW = 10;
+
+	@Test void a_full_task_wall_is_cut_to_the_screen_with_the_remaining_count() {
+		List<PublicTask> tasks = new ArrayList<>();
+		for (int i = 0; i < 32; i++) {
+			tasks.add(new PublicTask("t" + i, "Task " + i, TaskStatusWire.TODO, null));
+		}
+		PublicStudioState full = new PublicStudioState(9, true, List.of(), new Counts(32, 0, 0, 0, 0, 0, 0),
+			new GoalSummary(GoalStatusWire.NONE, 0, null), List.of(), new PublicPolicy(false, false, true, false), tasks);
+		int total = VisitorGate.stationLines(full, Station.TASK_WALL).size();
+		assertEquals(34, total);
+
+		int available = VisitorGate.rowsAvailable(262, CHROME, ROW);
+		assertEquals(19, available);
+		VisitorGate.Fit fit = VisitorGate.fit(total, available);
+		assertEquals(new VisitorGate.Fit(18, 16, true), fit);
+		assertEquals(19, fit.rows());
+		assertTrue(CHROME + fit.rows() * ROW <= 262, "the panel is taller than the screen");
+		assertEquals("+ 16 more", VisitorGate.moreLine(fit.remaining()));
+	}
+
+	@Test void a_body_that_fits_is_shown_whole_with_no_indicator() {
+		assertEquals(new VisitorGate.Fit(2, 0, false), VisitorGate.fit(2, 19));
+		assertEquals(new VisitorGate.Fit(19, 0, false), VisitorGate.fit(19, 19));
+		assertEquals(new VisitorGate.Fit(0, 0, false), VisitorGate.fit(0, 19));
+		assertEquals(new VisitorGate.Fit(34, 0, false), VisitorGate.fit(34, VisitorGate.rowsAvailable(1080, CHROME, ROW)));
+		// one row too many: the last row becomes the indicator, and it counts two lines
+		assertEquals(new VisitorGate.Fit(18, 2, true), VisitorGate.fit(20, 19));
+	}
+
+	@Test void a_screen_too_short_for_a_row_never_gives_a_negative_count() {
+		// shorter than the header and footer: no row, no indicator
+		assertEquals(0, VisitorGate.rowsAvailable(40, CHROME, ROW));
+		assertEquals(0, VisitorGate.rowsAvailable(CHROME + ROW - 1, CHROME, ROW));
+		assertEquals(0, VisitorGate.rowsAvailable(262, CHROME, 0));
+		assertEquals(new VisitorGate.Fit(0, 34, false), VisitorGate.fit(34, 0));
+		assertEquals(new VisitorGate.Fit(0, 34, false), VisitorGate.fit(34, -3));
+		// room for exactly one row: the indicator alone
+		assertEquals(1, VisitorGate.rowsAvailable(CHROME + ROW, CHROME, ROW));
+		assertEquals(new VisitorGate.Fit(0, 34, true), VisitorGate.fit(34, 1));
+		for (int available = -2; available <= 40; available++) {
+			VisitorGate.Fit fit = VisitorGate.fit(34, available);
+			assertTrue(fit.shown() >= 0 && fit.remaining() >= 0, "negative count at " + available);
+			assertEquals(34, fit.shown() + fit.remaining());
+			assertTrue(fit.rows() <= Math.max(0, available), "more rows than fit at " + available);
+		}
 	}
 
 	@Test void agent_lines_say_the_owner_and_never_the_viewer() {

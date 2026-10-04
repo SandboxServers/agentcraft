@@ -163,6 +163,47 @@ public final class VisitorGate {
 	}
 
 	/**
+	 * How a panel body fits the screen: the first {@code shown} lines are drawn, {@code remaining}
+	 * lines are left out, and {@code indicator} says whether a last "+ N more" row is drawn for them.
+	 */
+	public record Fit(int shown, int remaining, boolean indicator) {
+		/** The body rows the panel draws, the indicator row included. */
+		public int rows() {
+			return shown + (indicator ? 1 : 0);
+		}
+	}
+
+	/**
+	 * The body rows a panel can draw in {@code height} pixels once {@code chrome} (padding, header and
+	 * footer) is taken off. Never negative: a screen shorter than the chrome has room for no row.
+	 */
+	public static int rowsAvailable(int height, int chrome, int rowHeight) {
+		return rowHeight <= 0 ? 0 : Math.max(0, (height - chrome) / rowHeight);
+	}
+
+	/**
+	 * Fits {@code total} body lines into {@code available} rows. A list that fits is shown whole.
+	 * Otherwise the last available row is the indicator and the rows above it are the first lines;
+	 * with no row at all nothing is drawn. {@code shown + remaining} is always {@code total}.
+	 */
+	public static Fit fit(int total, int available) {
+		int lines = Math.max(0, total);
+		int rows = Math.max(0, available);
+		if (lines <= rows) {
+			return new Fit(lines, 0, false);
+		}
+		if (rows == 0) {
+			return new Fit(0, lines, false);
+		}
+		return new Fit(rows - 1, lines - rows + 1, true);
+	}
+
+	/** The indicator row for a truncated body. A count only: no public or private text. */
+	public static String moreLine(int remaining) {
+		return "+ " + remaining + " more";
+	}
+
+	/**
 	 * The read-only card body for a public agent: state, station and — for a waiting agent — the
 	 * <em>owner</em>, never the viewer. Activity stays out of the card: MP-11 shows name, state,
 	 * station and awaiting.
