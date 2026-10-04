@@ -177,17 +177,27 @@ final class MonitorScreen {
 	}
 
 	/**
-	 * Build the view from the studio only when its snapshot or the binding changed, so a steady frame
-	 * allocates nothing. The {@link StudioView} registry hands out a stable instance until a state
-	 * update replaces it. Returns true when a layout rebuilt.
+	 * Build the view from the studio only when its snapshot, the binding, the look or the panel size
+	 * changed, so a steady frame allocates nothing. The {@link StudioView} registry hands out a stable
+	 * instance until a state update replaces it. Returns true when a layout rebuilt.
 	 */
 	boolean syncRemoteSource(StudioView v, String binding, ScreenStyle st, int ppb, int panelW, int panelH) {
-		if (v == remoteSource && binding.equals(remoteBinding)) {
+		if (remoteUpToDate(v, binding, st, ppb, panelW, panelH)) {
 			return false;
 		}
 		remoteSource = v;
 		remoteBinding = binding;
 		return syncRemote(RemoteMonitorView.of(v.publicState(), v.online(), binding), st, ppb, panelW, panelH);
+	}
+
+	/**
+	 * True when the remote layout this screen holds was built from this snapshot and binding
+	 * <em>and</em> for this look and panel size: every input of {@link #syncRemote}, so a look switch
+	 * or a resized panel rebuilds without waiting for the studio's next state. Pure, no client needed.
+	 */
+	boolean remoteUpToDate(StudioView v, String binding, ScreenStyle st, int ppb, int panelW, int panelH) {
+		return v == remoteSource && binding.equals(remoteBinding) && st == style && ppb == this.ppb && panelW == this.panelW
+			&& panelH == this.panelH;
 	}
 
 	/**

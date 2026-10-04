@@ -69,6 +69,21 @@ class RemoteBoardViewTest {
 	}
 
 	@Test
+	void online_needs_both_the_presence_and_the_owners_foreman_link() {
+		// the relay keeps the last state with foremanOnline cleared when the owner's Foreman drops
+		PublicStudioState foremanDown = new PublicStudioState(2, false, List.of(), new Counts(2, 1, 4, 3, 5, 6, 7),
+			new GoalSummary(GoalStatusWire.NONE, 0f, null), List.of(), PublicPolicy.DEFAULT, null);
+		RemoteBoardView kept = RemoteBoardView.of(foremanDown, true);
+		assertTrue(kept.present());
+		assertFalse(kept.online());
+		// the last counts stay under the veil
+		assertEquals(new RemoteBoardView.Column(RemoteBoardView.Lane.TODO, 7, 5), kept.columns().get(0));
+		assertFalse(RemoteBoardView.of(foremanDown, false).online());
+		assertFalse(RemoteBoardView.of(noTasks(), false).online());
+		assertTrue(RemoteBoardView.of(noTasks(), true).online());
+	}
+
+	@Test
 	void cancelled_tasks_are_hidden_and_unknown_status_has_no_lane() {
 		assertNull(RemoteBoardView.lane(TaskStatusWire.CANCELLED));
 		RemoteBoardView v = RemoteBoardView.of(withTasks(List.of(new PublicTask("t", "Gone", TaskStatusWire.CANCELLED, null))), true);
