@@ -53,7 +53,7 @@ Proposed defaults are what the campaign builds against. The owner can change any
 2. Confirm D-MP05: should visitors be able to build anywhere, or only outside plots?
 3. Who is on the first whitelist? The colo already runs today's server (as a preview; remote players' agents don't render correctly until the campaign lands, A-13). Players also need the edge to forward TCP 25565 (A-53).
 4. Should the cast's `upstream-sync-steward` open a conversation with upstream about contributing multiplayer later (D-MP04)?
-5. Should the harness's live up/down cycle on Windows be run before #4 merges, and by whom? (Asked in the pull-request review; no decision yet.)
+5. The harness's live up/down cycle on Windows was run on 2026-10-04 (`worknotes/MP-H.md`). Who runs the one `down` on macOS that #4 still owes?
 
 ## Owner rulings from the pull-request review (2026-10-04)
 
