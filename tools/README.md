@@ -86,7 +86,8 @@ this checkout's Gradle daemon (never another checkout's).
 server, one local Foreman per player, and one or two clients. Requires Node 22.18+, Java 25,
 and `npm ci --prefix tools` / `npm ci --prefix foreman`. Uses portable macOS, Linux and Windows
 launch paths. Windows process control uses the existing PowerShell helpers and background
-runner; the Windows changes have unit coverage but have not been run on Windows.
+runner. Two full `up` / `down` cycles with two clients were run on Windows (2026-10-04, see
+`docs/multiplayer/worknotes/MP-H.md`); the Windows paths that run did not reach are marked below.
 
 ```sh
 node tools/mp.mjs up --slot 92 --clients 2 --backend sim --json
@@ -192,7 +193,7 @@ The Windows server has no stdin
 under the background runner, so there `up` enables RCON for it: loopback only, a random
 password, and whichever port is free (kept in `state.json`; the slot's block has none for
 it). `down` sends the console `stop` through it and waits up to 30 seconds for the save and
-exit before killing (unit-tested, not yet run on Windows). When the server had to be killed,
+exit before killing (run on Windows: the server saved its worlds and exited by itself). When the server had to be killed,
 on any platform, `down` says that it was killed without a final save: changes since its last
 autosave are lost and the world is still reused. Incomplete cleanup retains the
 records and returns an error so
