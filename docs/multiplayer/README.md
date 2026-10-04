@@ -59,24 +59,24 @@ Proposed defaults are what the campaign builds against. The owner can change any
 | Packet | Status | Wave | PR | Worknote |
 |---|---|---|---|---|
 | MP-00 Spike and plan | **Done** | — | (this commit) | [MP-00](worknotes/MP-00.md) |
-| MP-F Foundation | Ready | 0 | | |
-| MP-T Game tests | Ready | 0 | | |
-| MP-B Baseline (Node ≥ 22.18) | Ready | 0 | | |
-| MP-H Two-client harness | Ready | 0 | | |
-| MP-01 Server mode and world rules | BlockedDependency (MP-F) | 1 | | |
-| MP-02 Build at an offset | BlockedDependency (MP-F) | 1 | | |
-| MP-03 Plots: registry, lifecycle, commands | BlockedDependency (MP-F) | 1 | | |
-| MP-04 Layout sync | BlockedDependency (MP-F) | 1 | | |
-| MP-05 Public-state publisher and redaction | BlockedDependency (MP-F) | 1 | | |
-| MP-06 Relay and presence | BlockedDependency (MP-F) | 1 | | |
-| MP-07 World intents | BlockedDependency (MP-F) | 1 | | |
-| MP-08 Multi-studio agents | BlockedDependency (MP-F) | 1 | | |
-| MP-09 Studio-aware displays | BlockedDependency (MP-F) | 1 | | |
-| MP-10 Studio-aware stations | BlockedDependency (MP-F) | 1 | | |
-| MP-11 Visitor interactions | BlockedDependency (MP-F) | 1 | | |
-| MP-12 DevBridge in multiplayer | BlockedDependency (MP-F) | 1 | | |
-| MP-13 Plot protection | BlockedDependency (MP-F) | 1 | | |
-| MP-14 Deployment for multiplayer | BlockedDependency (MP-F); the release pipeline is already done | 1 | | |
+| MP-F Foundation | Review | 0 | #5 | [MP-F](worknotes/MP-F.md) |
+| MP-T Game tests | Review | 0 | #1 | [MP-T](worknotes/MP-T.md) |
+| MP-B Baseline (Node ≥ 22.18) | Review | 0 | #2 | [MP-B](worknotes/MP-B.md) |
+| MP-H Two-client harness | Review | 0 | #4 | [MP-H](worknotes/MP-H.md) |
+| MP-01 Server mode and world rules | Ready | 1 | | |
+| MP-02 Build at an offset | Ready | 1 | | |
+| MP-03 Plots: registry, lifecycle, commands | Ready | 1 | | |
+| MP-04 Layout sync | Ready | 1 | | |
+| MP-05 Public-state publisher and redaction | Ready | 1 | | |
+| MP-06 Relay and presence | Ready | 1 | | |
+| MP-07 World intents | Ready | 1 | | |
+| MP-08 Multi-studio agents | Ready | 1 | | |
+| MP-09 Studio-aware displays | Ready | 1 | | |
+| MP-10 Studio-aware stations | Ready | 1 | | |
+| MP-11 Visitor interactions | Ready | 1 | | |
+| MP-12 DevBridge in multiplayer | Ready | 1 | | |
+| MP-13 Plot protection | Ready | 1 | | |
+| MP-14 Deployment for multiplayer | Ready; the release pipeline is already done | 1 | | |
 | MP-I Integration | BlockedDependency (Wave 1) | 2 | | |
 | MP-Z Close-out, UAT, colo deploy | BlockedDependency (MP-I) | 3 | | |
 
@@ -85,9 +85,9 @@ Proposed defaults are what the campaign builds against. The owner can change any
 The full design, the frozen contract, the file-ownership matrix and the dependency graph are in [work-packets.md](work-packets.md). Summary:
 
 - **Wave 0 runs four packets in parallel now.** MP-F is the only gate for code. It freezes every contract and pre-wires empty feature classes, so no later packet edits the shared wiring. MP-T (game tests), MP-B (Node baseline) and MP-H (the dedicated server + two clients + two Foremen harness) need nothing from it.
-- **Wave 1 runs 14 packets in parallel** once MP-F merges, and no Wave-1 packet waits for another:
+- **Wave 1 runs 14 packets in parallel** once MP-F merges, and no Wave-1 packet waits for another to build and test:
   - **The renderer packets** (MP-08 to MP-11) verify in singleplayer through MP-F's `dev.mp.fake` overlay, which makes your own studio render as someone else's.
-  - **The networking packets** verify on MP-H's harness against MP-F's default plot directory.
+  - **The networking packets** verify with JUnit and game tests against a fake `PlotDirectory`. Their harness checks that need an owned plot run once MP-03's registry is merged (merge MP-03 first among them), otherwise in MP-I.
   - Runtime meeting points go through MP-F contracts and are proven together in MP-I.
 - **Wave 2** is MP-I: end-to-end on the harness, a leak scan of relayed bytes and remote screenshots, and a full singleplayer QA compare against MP-F's baseline.
 - **Wave 3** is MP-Z: docs, the shipped config, the owner UAT, and the colo deploy (owner-confirmed).
