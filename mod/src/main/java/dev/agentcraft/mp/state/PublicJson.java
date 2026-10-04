@@ -6,10 +6,11 @@ import java.util.function.Function;
 
 /** Strict JSON boundary shared by dev injection and bounded wire codecs. Unknown fields fail closed. */
 public final class PublicJson {
-    public static final Gson GSON = new GsonBuilder().disableHtmlEscaping()
+    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping()
         .registerTypeAdapterFactory(new WireEnums()).create();
     private PublicJson() {}
     private static final class WireEnums implements TypeAdapterFactory {
+        @SuppressWarnings("unchecked")
         public <T> TypeAdapter<T> create(Gson gson, com.google.gson.reflect.TypeToken<T> type) {
             Class<? super T> raw=type.getRawType();
             if (!raw.isEnum() || !raw.getPackageName().equals("dev.agentcraft.mp.state")) return null;

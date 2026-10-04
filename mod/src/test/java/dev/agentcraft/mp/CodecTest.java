@@ -100,4 +100,25 @@ public class CodecTest {
         assertDecodeFails(LayoutS2C.CODEC,new LayoutS2C(StudioId.LOCAL,0,Anchors.builder("studio").put("a",Double.NaN,0,0,0,0).build()));
         var b=buf(); try { b.writeVarInt(1); b.writeUtf("{broken"); b.readerIndex(1); assertThrows(RuntimeException.class,()->PublicStateC2S.CODEC.decode(b)); } finally { b.release(); }
     }
+    @Test void opt_in_state_accepts_exact_caps_and_preserves_the_public_allowlist() {
+        List<PublicAgent> agents=new ArrayList<>();
+        List<CiSlot> ci=new ArrayList<>(); List<PublicTask> tasks=new ArrayList<>();
+        for(int i=0;i<16;i++) agents.add(new PublicAgent("a"+i,"N".repeat(16),"s".repeat(16),AgentStateWire.THINKING,StationWire.LIBRARY,true,false,false,"a".repeat(48)));
+        for(int i=0;i<8;i++) ci.add(new CiSlot(i,CiStatusWire.UNKNOWN));
+        for(int i=0;i<32;i++) tasks.add(new PublicTask("t"+i,"T".repeat(80),TaskStatusWire.TODO,"a0"));
+        PublicStudioState s=new PublicStudioState(2,true,agents,new Counts(32,0,0,0,0,0,0),new GoalSummary(GoalStatusWire.PLANNING,0,"G".repeat(120)),ci,new PublicPolicy(true,true,true,true),tasks);
+        assertRound(PublicStateC2S.CODEC,new PublicStateC2S(s));
+    }
+    @Test void public_record_shape_is_the_frozen_privacy_allowlist_and_c2s_has_no_studio_claim() {
+        Map<Class<?>,String> shapes=Map.of(
+            PublicStudioState.class,"rev foremanOnline agents counts goal ci policy tasks",
+            PublicAgent.class,"id name skin state station active paused awaitingUser activity",
+            Counts.class,"todo doing review done blocked openDecisions openMerges",
+            GoalSummary.class,"status progress text",CiSlot.class,"slot ci",
+            PublicTask.class,"id title status assignee",PublicPolicy.class,"activityText sayText taskTitles goalText");
+        shapes.forEach((type,fields)->assertEquals(List.of(fields.split(" ")),Arrays.stream(type.getRecordComponents()).map(java.lang.reflect.RecordComponent::getName).toList(),type.getSimpleName()));
+        for(Class<?> type:List.of(HelloC2S.class,PublicStateC2S.class,StudioEventC2S.class,WorldIntentC2S.class))
+            assertFalse(Arrays.stream(type.getRecordComponents()).anyMatch(c->c.getType()==StudioId.class),type.getSimpleName());
+    }
+
 }

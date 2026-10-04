@@ -26,7 +26,10 @@ public enum MpMode {
     private static void change(MpMode mode) {
         if(mode==current) return;
         MpMode before=current; current=mode;
-        MpLog.event(MpEvents.MODE_CHANGED,"from",before,"to",mode,"server",serverHash);
+        if(Anchors.self().equals(StudioId.LOCAL))
+            MpLog.event(MpEvents.MODE_CHANGED,"from",before,"to",mode,"server",serverHash);
+        else
+            MpLog.event(MpEvents.MODE_CHANGED,"from",before,"to",mode,"server",serverHash,"player",Anchors.self().owner(),"studio",Anchors.self().owner());
         LISTENERS.forEach(l->l.accept(mode));
     }
     public static void joined(boolean integrated,String hash) {
