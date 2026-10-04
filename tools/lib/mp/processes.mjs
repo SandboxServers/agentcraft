@@ -1,7 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
-import { psQuote } from './launch.mjs';
+import { exportScript, psQuote } from './launch.mjs';
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function readJson(file) {
@@ -53,6 +54,7 @@ export function processInventory(root) {
 
 // Durable intent precedes spawn. A unique marker outside the Java argfile permits recovery
 // if the launcher dies in the tiny gap between spawn and recording the PID/start time.
+// The build's marker is a Gradle project property; the shared daemon never carries it.
 export function recoverProcesses(entry, root, inventory = processInventory(root), stamp = processStamp) {
   const found = [];
   const pending = [entry.wrapper, entry];
@@ -66,7 +68,9 @@ export function recoverProcesses(entry, root, inventory = processInventory(root)
   for (const p of inventory) {
     if (!p.command.includes(entry.marker) || found.some(record => record.pid === p.pid)) continue;
     const startsWithExe = executable => executable && (p.command.startsWith(`${executable} `) || p.command.startsWith(`"${executable}" `));
-    const direct = startsWithExe(entry.executable) || (entry.kind === 'foreman' && p.command.trim() === entry.marker);
+    // gradlew execs Java, so a build has no stable executable prefix: require its init script too.
+    const direct = startsWithExe(entry.executable) || (entry.kind === 'foreman' && p.command.trim() === entry.marker) ||
+      (entry.kind === 'build' && p.command.includes(exportScript(root)));
     const wrapper = startsWithExe(process.execPath) && p.command.includes(path.join(root, 'tools', 'lib', 'bgrun.mjs'));
     // A coordinator's grep/search containing our marker is never a harness process.
     if (!direct && !wrapper) continue;
@@ -117,7 +121,8 @@ export async function startProcess(spec, entry, state, persist, { platform = pro
   return entry;
 }
 
-export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRecord = record, persist = () => {}, kind,
+/** Resolves true when a process had to be force-killed after the wait. */
+export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRecord = record, persist = () => {}, kind, requested = false,
   platform = process.platform, shell = powershell, stamp = processStamp, now = Date.now, delay = sleep,
   inventory = processInventory, kill = process.kill.bind(process), budgetMs = Infinity } = {}) {
   const deadline = now() + budgetMs;
@@ -127,10 +132,11 @@ export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRec
   record.members = members.filter(member => member.pid !== record.pid);
   persist(); // retain child identities even if the group leader exits or down crashes
   if (platform === 'win32') {
-    // Java treats Ctrl+Break as a thread dump, not a graceful shutdown.
+    // Java treats Ctrl+Break as a thread dump, not a graceful shutdown: a JVM is only worth
+    // waiting for when its exit was requested another way (dev.quit, or the server's RCON stop).
     if (kind === 'foreman' && sameProcess(consoleRecord, root, stamp)) {
       if (shell(root, `Send-CtrlBreak ${consoleRecord.pid}`).toLowerCase() !== 'true') timeoutMs = 0;
-    } else if (kind !== 'client') timeoutMs = 0;
+    } else if (kind !== 'client' && !requested) timeoutMs = 0;
   } else {
     // Direct POSIX launches own a detached group. Signal its tools too, while the leader's
     // PID/start identity still matches, then retain member identities across leader exit.
@@ -139,7 +145,8 @@ export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRec
   }
   const until = Math.min(deadline, now() + timeoutMs);
   while (now() < until && members.some(member => sameProcess(member, root, stamp))) await delay(Math.min(100, Math.max(0, deadline - now())));
-  for (const member of members.filter(member => sameProcess(member, root, stamp))) {
+  const forced = members.filter(member => sameProcess(member, root, stamp));
+  for (const member of forced) {
     if (platform === 'win32') shell(root, `Stop-OwnTree ${member.pid} ${psQuote(member.startTime)} | Out-Null`);
     else {
       try { kill(member.pid, 'SIGKILL'); }
@@ -149,6 +156,33 @@ export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRec
   for (let i = 0; i < 50 && now() < deadline && members.some(member => sameProcess(member, root, stamp)); i++) await delay(Math.min(100, Math.max(0, deadline - now())));
   const left = members.filter(member => sameProcess(member, root, stamp));
   if (left.length) throw new Error(`processes ${left.map(member => member.pid).join(', ')} are still running`);
+  return forced.length > 0;
+}
+
+/** The dedicated server's console `stop` (save, then exit) over RCON; rejects unless it was sent. */
+export function rconStop(port, password, { timeoutMs = 5000 } = {}) {
+  const packet = (id, type, body) => {
+    const data = Buffer.alloc(14 + Buffer.byteLength(body)); // length, id, type, body, two NULs
+    [data.length - 4, id, type].forEach((value, i) => data.writeInt32LE(value, 4 * i));
+    data.write(body, 12);
+    return data;
+  };
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: '127.0.0.1', port });
+    let sent = false;
+    // Once the stop is on its way, a reply, a timeout and a dropped connection all mean the same.
+    const finish = error => { socket.destroy(); sent ? resolve() : reject(error); };
+    socket.setTimeout(timeoutMs, () => finish(new Error('RCON timed out')));
+    socket.once('connect', () => socket.write(packet(1, 3, password)));
+    // The server reads one packet at a time and answers a login with its id, or -1 to refuse.
+    socket.on('data', reply => {
+      if (sent || reply.length < 12 || reply.readInt32LE(4) !== 1) return finish(new Error('RCON refused the login'));
+      sent = true;
+      socket.write(packet(2, 2, 'stop'));
+    });
+    socket.once('error', finish);
+    socket.once('close', () => finish(new Error('RCON closed before the stop was sent')));
+  });
 }
 
 export function groupSnapshot(record, inventory, root, stamp = processStamp) {

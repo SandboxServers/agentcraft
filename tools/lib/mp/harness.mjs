@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { makePlan } from './config.mjs';
-import { gradleInvocation, javaArguments, javaArgfile, javaEnvironment, seedGameDirs, gradleEnvironment, requireJava25 } from './launch.mjs';
+import { gameSpec, gradleInvocation, javaArgfile, javaEnvironment, seedGameDirs, gradleEnvironment, requireJava25 } from './launch.mjs';
 import { clientCommand, readLogTail, waitWithBindRecovery } from './index.mjs';
-import { ownsPort, processInventory, processStamp, readJson, recoverProcesses, sameProcess, saveJson, sleep,
+import { ownsPort, processInventory, processStamp, rconStop, readJson, recoverProcesses, sameProcess, saveJson, sleep,
   startProcess, stopProcess } from './processes.mjs';
 
 export function portOpen(port) {
@@ -19,6 +19,17 @@ export function portOpen(port) {
     socket.once('error', () => finish(false));
   });
 }
+
+export async function requireFreePorts(plan, open = portOpen) {
+  for (const port of [plan.server.port, ...plan.clients.flatMap(c => [c.devPort, c.foremanPort])]) {
+    if (await open(port)) throw new Error(`port ${port} is already in use; left its owner alone`);
+  }
+}
+
+const freePort = () => new Promise((resolve, reject) => {
+  const probe = net.createServer().once('error', reject);
+  probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
+});
 
 export function loadState(plan) {
   const state = readJson(plan.file);
@@ -46,30 +57,44 @@ export function summarize(plan, state, inventory, recover = recoverProcesses) {
     statesCapturedAt: state?.statesCapturedAt ?? null, processes: running };
 }
 
-async function withLock(plan, fn) {
-  fs.mkdirSync(plan.dir, { recursive: true });
+// control.lock/<n>/owner.json is generation n of the slot's lock. A stale generation is never
+// deleted to make room: its successor n+1 is claimed by an exclusive mkdir, so two controllers
+// recovering the same stale lock contend for one name and only one of them can create it. The
+// winner then reads the lock again, and holds it only while its own owner record is intact
+// and no other generation has a live owner.
+export async function withLock(plan, fn, { stamp = processStamp } = {}) {
   const lock = path.join(plan.dir, 'control.lock');
-  try { fs.mkdirSync(lock); }
-  catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    const lease = readJson(path.join(lock, 'owner.json'));
-    if (sameProcess(lease, plan.root) || (!lease && Date.now() - fs.statSync(lock).mtimeMs < 2000)) {
-      throw new Error('another up/down is active for this slot; wait or interrupt that launcher');
-    }
-    fs.rmSync(lock, { recursive: true });
-    // An exclusive mkdir arbitrates two workers trying to recover the same stale lock.
-    fs.mkdirSync(lock);
-  }
+  fs.mkdirSync(lock, { recursive: true });
+  const busy = () => new Error('another up/down is active for this slot; wait or interrupt that launcher');
+  const owner = n => path.join(lock, String(n), 'owner.json');
+  const remove = n => fs.rmSync(path.dirname(owner(n)), { recursive: true, force: true, maxRetries: 3 });
+  const generations = () => fs.readdirSync(lock).filter(name => /^\d+$/.test(name)).map(Number);
+  const live = n => {
+    const lease = readJson(owner(n));
+    if (lease) return sameProcess(lease, plan.root, stamp);
+    // No owner yet: the claimant is between its mkdir and its first write, or died there.
+    return Date.now() - (fs.statSync(path.dirname(owner(n)), { throwIfNoEntry: false })?.mtimeMs ?? 0) < 2000;
+  };
+  const seen = generations();
+  if (seen.some(live)) throw busy();
+  const mine = Math.max(0, ...seen) + 1;
+  const lease = { pid: process.pid, startTime: stamp(process.pid, plan.root), token: randomUUID() };
+  const held = () => readJson(owner(mine))?.token === lease.token;
+  try { fs.mkdirSync(path.dirname(owner(mine))); }
+  catch (error) { throw error.code === 'EEXIST' ? busy() : error; }
   try {
-    saveJson(path.join(lock, 'owner.json'), { pid: process.pid, startTime: processStamp(process.pid, plan.root) });
+    saveJson(owner(mine), lease);
+    const others = generations().filter(n => n !== mine);
+    if (!held() || others.some(live)) throw busy();
+    others.forEach(remove);
     return await fn();
   }
-  finally { fs.rmSync(lock, { recursive: true, force: true }); }
+  finally { if (held()) remove(mine); }
 }
 
 export async function shutdown(plan, state, progress = () => {}, {
   inventory = processInventory, recover = recoverProcesses, portOwned = ownsPort,
-  command = clientCommand, stop = stopProcess,
+  command = clientCommand, stop = stopProcess, platform = process.platform, serverStop = rconStop,
 } = {}) {
   if (!state) return;
   state.phase = 'stopping';
@@ -85,16 +110,28 @@ export async function shutdown(plan, state, progress = () => {}, {
     entry.recoveredProcesses = records;
     saveJson(plan.file, state);
     progress(`Stopping ${entry.kind}${entry.client ? ` ${entry.client.toUpperCase()}` : ''}...`);
+    let requested = false;
     if (entry.kind === 'client') {
       const client = state.clients.find(c => c.id === entry.client);
       if (records.some(record => portOwned(record, client.devPort, plan.root))) {
         try { await command(state, client.id, 'dev.quit', {}, { timeoutMs: 5000 }); }
         catch { /* a stalled/disconnected bridge falls back to the recorded PID */ }
       }
+    } else if (entry.kind === 'server' && platform === 'win32' && state.rcon &&
+      records.some(record => portOwned(record, state.rcon.port, plan.root))) {
+      // Start-Bg gives the server no stdin and no console event makes a JVM exit cleanly, so
+      // its `stop` (save, then exit) goes over the RCON port this run seeded and still owns.
+      try { await serverStop(state.rcon.port, state.rcon.password); requested = true; }
+      catch { /* not listening yet, or refused: nothing to wait for */ }
     }
     for (const record of records) {
-      try { await stop(record, plan.root, { timeoutMs: entry.kind === 'server' ? 30_000 : 5000,
-        kind: entry.kind, consoleRecord: entry.wrapper ?? record, persist: () => saveJson(plan.file, state) }); }
+      try {
+        const forced = await stop(record, plan.root, { timeoutMs: entry.kind === 'server' ? 30_000 : 5000, requested,
+          kind: entry.kind, consoleRecord: entry.wrapper ?? record, persist: () => saveJson(plan.file, state) });
+        if (forced && entry.kind === 'server' && record.role !== 'wrapper' && record.pid !== entry.wrapper?.pid) {
+          progress('The server did not exit by itself and was killed without a final save: changes since its last autosave are lost.');
+        }
+      }
       catch (error) { failures.push(error.message); }
     }
   }
@@ -104,12 +141,14 @@ export async function shutdown(plan, state, progress = () => {}, {
   if (left.length || failures.length) throw new Error(`cleanup incomplete: ${[...failures, ...left.map(p => `PID ${p.pid}`)].join('; ')}`);
 }
 
-export async function prepare(plan, state, opt, progress, check, { spawnBuild = spawn, stamp = processStamp, wait = waitForBuild } = {}) {
+export async function prepare(plan, state, opt, progress, check, { spawnBuild = spawn, stamp = processStamp, wait = waitForBuild,
+  ports = requireFreePorts } = {}) {
   const output = path.join(plan.dir, 'launch.json');
   if (!opt['no-build']) {
     progress('Preparing Loom launch metadata (no game tasks)...');
-    const spec = gradleInvocation(plan.root, output, opt['gradle-command']);
     const entry = { kind: 'build', marker: `ac-mp-${randomUUID()}`, log: path.join(plan.dir, 'build.log') };
+    // The marker rides on the Gradle command line, so down finds the build without a recorded PID.
+    const spec = gradleInvocation(plan.root, output, opt['gradle-command'], process.platform, entry.marker);
     state.processes.push(entry);
     saveJson(plan.file, state);
     const fd = fs.openSync(entry.log, 'w');
@@ -128,6 +167,9 @@ export async function prepare(plan, state, opt, progress, check, { spawnBuild = 
   }
   const launch = readJson(output);
   if (!launch?.client || !launch?.server) throw new Error(`missing launch metadata: ${output}; omit --no-build or export with gw`);
+  // The Gradle step can take minutes: the ports checked before it must still be free now,
+  // immediately before the caller starts the processes that bind them.
+  await ports(plan);
   return launch;
 }
 
@@ -183,13 +225,15 @@ export async function runHarness(root, opt, { progress = () => {}, check = () =>
       check();
       const env = javaEnvironment();
       const java = requireJava25(env);
-      const ports = [plan.server.port, ...plan.clients.flatMap(c => [c.devPort, c.foremanPort])];
-      for (const port of ports) if (await portOpen(port)) throw new Error(`port ${port} is already in use; left its owner alone`);
+      await requireFreePorts(plan); // fails fast; prepare checks again after the Gradle step
       for (const [dir, dependency] of [['foreman', 'tsx'], ['tools', 'ws']]) {
         if (!fs.existsSync(path.join(root, dir, 'node_modules', dependency))) throw new Error(`run npm ci --prefix ${dir} first`);
       }
       const launch = await prepare(plan, state, opt, progress, check);
-      seedGameDirs(plan);
+      // Windows stops the server over RCON (see shutdown). The slot's block has no port for it,
+      // so it listens on whichever loopback port is free; the first persist below records it.
+      if (process.platform === 'win32') state.rcon = { port: await freePort(), password: randomUUID() };
+      seedGameDirs(plan, state.rcon);
       const persist = () => saveJson(plan.file, state);
       const start = async (kind, client, spec, timeoutMs = opt.timeout * 1000) => {
         check();
@@ -206,16 +250,10 @@ export async function runHarness(root, opt, { progress = () => {}, check = () =>
       };
       async function launchClient(client, timeoutMs) {
         progress(`Starting client ${client.id.toUpperCase()} (${client.heap} heap, ${client.gameDir})...`);
-        await start('client', client, { command: java,
-          args: javaArguments(launch.client, client.heap, client, plan.server.port), cwd: client.gameDir, log: client.log,
-          env: { ...env, AGENTCRAFT_PORT: String(client.foremanPort), AGENTCRAFT_DEV_PORT: String(client.devPort),
-            AGENTCRAFT_HOME: plan.home, AGENTCRAFT_PROFILE: client.profile, AGENTCRAFT_PLAYER: client.username,
-            AGENTCRAFT_DEV: '1', AGENTCRAFT_FOREMAN: '1', AGENTCRAFT_AUTOWORLD: '0',
-            AGENTCRAFT_MUTE: '1', AGENTCRAFT_FOCUS: '0', AGENTCRAFT_NOTIFY: '0' } }, timeoutMs);
+        await start('client', client, gameSpec(plan, launch, java, env, client), timeoutMs);
       }
       progress(`Starting server :${plan.server.port} (${plan.server.heap} heap)...`);
-      const server = await start('server', null, { command: java,
-        args: javaArguments(launch.server, plan.server.heap), cwd: plan.server.gameDir, log: plan.server.log, env });
+      const server = await start('server', null, gameSpec(plan, launch, java, env));
       await waitUntil(() => readLogTail(plan.server.log).includes('Done ('), server, plan, opt.timeout * 1000, check);
       for (const client of plan.clients) {
         progress(`Starting Foreman ${client.id.toUpperCase()} :${client.foremanPort}...`);

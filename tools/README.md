@@ -122,7 +122,9 @@ so injected JVM flags cannot override the caps. Gradle's own memory configuratio
 Java 25 is checked before preparation, including with `--no-build`. Gradle preparation
 inherits `JAVA_HOME` and `GRADLE_USER_HOME`; when the latter is unset it uses this checkout's
 `.gradle-home`. The portable default is `sh ./gradlew` on POSIX or `gradlew.bat` via PowerShell on Windows. Override the executable
-with `--gradle-command` or `AGENTCRAFT_MP_GRADLE`. `--no-build` reuses this slot's previously
+with `--gradle-command` or `AGENTCRAFT_MP_GRADLE`. On Windows a `.bat` or `.cmd` override runs
+through the same PowerShell invocation, because Node refuses to spawn a batch file directly
+(`EINVAL`); a bare file name found in `mod/` is run from there. `--no-build` reuses this slot's previously
 exported metadata; export again after changing code, Java/Loom settings or platforms.
 The init script depends on Loom 1.18.2's `configureClientLaunch` (including `downloadAssets`
 and platform natives when needed), then reads Loom's real task classpaths, JVM arguments
@@ -139,11 +141,15 @@ Worlds and client options persist across `down` / `up`; use a fresh slot directo
 fresh world. The current pre-MP-F mod ignores the new multiplayer config; plot/relay checks
 require their campaign packets to land.
 
-`up` refuses occupied ports or an existing live run, waits up to `--timeout` seconds
+`up` refuses occupied ports (checked before the Gradle step and again right after it, before
+anything is started) or an existing live run, waits up to `--timeout` seconds
 (default 600) per startup stage, and rolls back on failure/interruption. Readiness requires
 every client's `dev.state` to show a loaded remote world, the expected player and its own
 synced Foreman. Before MP-12, remote means `world.name === null` plus a loaded dimension;
-it does not imply that the server has sent the multiplayer hello.
+it does not imply that the server has sent the multiplayer hello. The harness sets
+`AGENTCRAFT_DEV_REMOTE=1` for the game clients it launches (not for the server or the Foremen),
+because it drives them through the DevBridge commands that act on a remote server; a player's
+own client must not set it.
 
 The library scans each client stdout log from the beginning for terminal DevBridge errors.
 `up` handles a bind failure by stopping only that client, waiting 35 seconds on macOS or
@@ -176,13 +182,18 @@ Always run `down`, including after a failed `up`. It stops only recorded PID/sta
 identities, can recover a launcher crash using unique per-process launch markers, and
 never kills shared Gradle daemons or foreign port owners. It asks an owned DevBridge to
 quit, then signals the clients, Foremen and dedicated server, with bounded waits and a
-force-stop fallback. On Windows only Foremen receive Ctrl+Break; clients get their
-post-`dev.quit` wait, and the dedicated server is terminated without a final save. Server
-changes since its last autosave can be lost on Windows. Incomplete cleanup retains the
+force-stop fallback. On Windows only Foremen receive Ctrl+Break (a JVM answers it with a
+thread dump) and clients get their post-`dev.quit` wait. The Windows server has no stdin
+under the background runner, so there `up` enables RCON for it: loopback only, a random
+password, and whichever port is free (kept in `state.json`; the slot's block has none for
+it). `down` sends the console `stop` through it and waits up to 30 seconds for the save and
+exit before killing (unit-tested, not yet run on Windows). When the server had to be killed,
+on any platform, `down` says that it was killed without a final save: changes since its last
+autosave are lost and the world is still reused. Incomplete cleanup retains the
 records and returns an error so
-`down` can be retried. One controller can recover a stale launcher control lock. Do not
-run concurrent `up`/`down` controllers on a slot: concurrent stale-lock takeover has a known
-race (F7) awaiting a fenced locking design. Process-table access is required: a sandbox denying `ps` or PowerShell inspection fails before launch.
+`down` can be retried. Only one controller can take over a stale launcher control lock: a
+takeover claims the next generation under `control.lock/` with an exclusive `mkdir`, and the
+others get "another up/down is active". Process-table access is required: a sandbox denying `ps` or PowerShell inspection fails before launch.
 
 Later packets can import the harness helpers:
 
@@ -192,9 +203,10 @@ import { clientCommand, waitForClients, readServerEvents, readClientEvents } fro
 const states = await waitForClients(plan);
 await clientCommand(plan, 'a', 'dev.camera', { anchor: 'cam_room' });
 await clientCommand(plan, 'b', 'dev.state');
-let { events, offset } = readServerEvents(plan, { event: 'hello_sent' });
-({ events, offset } = readServerEvents(plan, { offset }));
-const clientEvents = readClientEvents(plan, 'a'); // retain a separate offset per file
+let { events, offset, generation } = readServerEvents(plan, { event: 'hello_sent' });
+// pass both back: the generation tells a log replaced by a later `up` from one that only grew
+({ events, offset, generation } = readServerEvents(plan, { offset, generation }));
+const clientEvents = readClientEvents(plan, 'a'); // retain a separate cursor per file
 ```
 
 `readServerEvents` and `readClientEvents` read each game directory's `logs/debug.log`,
