@@ -17,11 +17,14 @@
 | `main/mp/{StudioId,Plot,PlotGrid,PlotDirectory,Plots}` | Immutable studio identity and plot origins; square spiral, inverse footprint lookup, default LOCAL plot 0 directory. Site containment includes boundary block coordinates. |
 | `main/mp/state/*` | Exact public record allowlist, lower-case validated wire enums, all-false public policy, immutable collections, strict bounded/sanitized `PublicJson` readers for state, events and intents; `none` goal status, closed lamp bindings and outbound state validation. |
 | `main/mp/net/*` | Protocol 1, all ten payload records/codecs and one-time play-phase registration. Dedicated/enabled/can-send-gated hello; connection UUID attribution and compatible-client marker, removed on disconnect/server stop. |
-| `main/mp/{MpServerConfig,MpLog,MpEvents,MpReasons}` | Dedicated-only config load, reversible `install` override, exact default values, WARN/default invalid-value behavior; full telemetry catalog and scoped capture hook. |
-| `main/layout/Anchors.java` | Per-studio immutable snapshots and listeners; self-relative legacy API, unchanged LOCAL disk file and saved revision behavior; builder origin translates all anchor paths and bounds. |
+| `main/mp/{MpServerConfig,MpLog,MpEvents,MpReasons}` | Dedicated-only config load, reversible `install` override, exact default values, WARN/default invalid-value behavior; full telemetry catalog and scoped capture hook; Wave 1 reason constants and `studio_event_rejected` (WARN). |
+| `main/layout/Anchors.java` | Per-studio immutable snapshots and listeners; self-relative legacy API, unchanged LOCAL disk file and saved revision behavior; builder origin translates all anchor paths and bounds; public `fromJson` shares the existing persistence format. |
 | `main/hq/HqBuilder.java` | `Options(force, origin, studio)` and retained `Options(force)` constructor; defaults ZERO/LOCAL. Builders still ignore options until MP-02. |
 | `client/mp/{StudioView,Studios,MpMode}` | Own/remote registry, plot-first/layout-fallback lookup, overlay seam, state/event listeners, stable non-reused slots per connection; gated hello, 100-tick no-hello timeout, client-executor disconnect reset, retained server info and registered plots, process-salted address-hash telemetry and REMOTE_VANILLA HUD indicator. |
 | `client/mp/dev/MpDevFake.java` | `dev.mp.fake` state/event/clear and `dev.mp.studios`; typed Fields access, shared registry listeners, default overlay, no Foreman or network mutation. |
+| `main/mp/RateBucket.java` | Pure caller-clock bucket: starts full at twice the rate, preserves fractional refill credit, caps long idle intervals and ignores backwards time. |
+| `main/mp/server/StudioRange.java` | Shared server visibility for layouts/state: own plot always, remote plots within the overworld chunk radius; ordered leave/enter notifications, periodic and hello-triggered refresh, viewer queries and lifecycle cleanup. |
+| `mod/src/test/java/dev/agentcraft/client/foreman/ForemanStates.java` | Fresh test-only Foreman states from the two supplied snapshot resources or a caller's JSON; no running client needed. |
 | Six common and four client F-stubs | Each initially has an empty `init()`; all wired once in `AgentCraft`/`ClientFeatures`. |
 | `mod/build.gradle`, `mod/src/test/java/dev/agentcraft/mp/*` | Isolated JUnit 5 setup, including client contract testing. No game-test source-set edits. Frozen public-record shape, identity-free C2S, exact-cap opt-in acceptance, codec, caps, malformed-input, sanitization, plot, config, anchor, registry, hello, telemetry, dev overlay and wiring tests. |
 
@@ -206,3 +209,35 @@ The worker cannot commit in its sandbox; the coordinator committed its work afte
 5. `e20b2f2` — dev overlay and inspection commands.
 6. `51ca0be` — F-stubs and wiring.
 7. Final verification/worknote commit follows these six implementation commits.
+
+## Seams for Wave 1
+
+This round adds five seams; no commits or live processes were started. The existing worknote above is retained as historical verification. `gw` below is the swarm wrapper, run from `<worktree>/mod`.
+
+1. **Telemetry:** new `public static final String` constants `MpReasons.MULTIPLAYER_SCREEN = "multiplayer_screen"`, `BAD_ORIGIN = "bad_origin"`, `BUILD_ERROR = "build_error"`, `UNKNOWN_AGENT = "unknown_agent"`; `MpEvents.STUDIO_EVENT_REJECTED = "studio_event_rejected"`, catalog level `warn`, owned by MP-06. `FoundationTest` pins the names/level and captures the new event.
+2. **Layout persistence:** `public static Anchors.Layout Anchors.fromJson(JsonObject root)`. This is the existing reader with public visibility; `Anchors.toJson(Layout)` is unchanged. `AnchorsTest` round-trips bounded and unbounded layouts including anchors and revision.
+3. **Rates:** `public RateBucket(int ratePerSecond)` and `public boolean tryTake(long nowNanos)`, in `dev.agentcraft.mp`. Positive rate required; capacity is twice the rate, initially full. The first call establishes the time origin; later calls refill from caller-supplied nanoseconds. Backwards time neither refills nor moves the last-time watermark. Each player/state/event/intent uses its own bucket. `RateBucketTest` covers burst size, one-second refill, fractional credit, backwards time, invalid rates and extreme idle intervals.
+4. **Visibility:** `dev.agentcraft.mp.server.StudioRange` exposes the following exact public API:
+
+   ```java
+   static int chunkDistance(Plot plot, int chunkX, int chunkZ)
+   static List<Plot> visiblePlots(Collection<Plot> plots, StudioId own,
+       boolean overworld, int chunkX, int chunkZ, int radius)
+   static Change diff(Collection<Plot> previous, Collection<Plot> next)
+   record Change(List<Plot> left, List<Plot> entered)
+   static void init()
+   static void addListener(Listener listener)
+   interface Listener {
+       void entered(ServerPlayer viewer, Plot plot);
+       void left(ServerPlayer viewer, Plot plot);
+   }
+   static void refresh(MinecraftServer server)
+   static List<ServerPlayer> viewersOf(MinecraftServer server, StudioId studio)
+   static boolean sees(UUID viewer, StudioId studio)
+   ```
+
+   The three core functions have no `ServerPlayer` parameters. Results retain input order and are immutable; changed index/origin counts as left and entered. Chunk distance uses the full inclusive site footprint, floor division for negative coordinates, and horizontal Chebyshev distance. Only own plots remain visible outside the overworld. The shell is server-thread-only, gates on dedicated AND current enabled config, tracks mod-equipped online viewers, refreshes every 20 server ticks and immediately after an accepted hello, calls all left notifications before entered notifications per viewer, and keeps listener registration order. Disconnect silently forgets a viewer; stop clears viewer/server state. One-time feature listener registrations survive server restarts. `init()` is wired after payload registration and before the feature stubs. `StudioRangeTest` covers edge chunks, outside distances/corners, negative origins, radius zero, dimensions, and changed-plot diffs; `WiringTest` pins initialization and order. Server/player/chunk and Fabric callback signatures were verified in read-only sources/jars. The thin shell was compiled, not exercised on a live server in this round.
+5. **Foreman fixtures:** test-only `dev.agentcraft.client.foreman.ForemanStates` exposes `public static ForemanState showcase()`, `showcaseLate()`, and `fromSnapshot(JsonObject snapshot)`. Each returns a fresh synced state fed through the existing package-private constructor/receive path. `ForemanStatesTest` loads both without Minecraft: each has 6 agents, 9 tasks and a goal; open decisions are 2 and 0 respectively (the late fixture has 6 answered decisions). Tests also check fresh instances and custom snapshot isolation. The two supplied resource files were not edited; their hashes remain unchanged. No production Foreman class changed.
+6. **Remote agent clicks** (added by the coordinator after this round, from an advisor's question): `dev.agentcraft.client.mp.RemoteAgentClicks` exposes `public static void set(BiConsumer<StudioView, String> handler)` and `public static void fire(StudioView studio, String agentId)`. MP-08 calls `fire` for a click on a remote studio's agent instead of opening the own agent card; MP-11 registers its read-only card with `set`. With no handler registered a click does nothing. `RemoteAgentClicksTest` covers the default, the registered handler and its replacement.
+
+Verification: pre-edit `gw test --rerun --no-build-cache` passed all 32 tests. Final `gw test --rerun --no-build-cache` passed all 45 tests (zero failures/errors/skips); `gw build` passed. `git diff --check` passed. Status contains only this round's intended changes plus the coordinator's modified `work-packets.md` and supplied untracked fixtures. The coordinator's contract file was never written, staged or reverted by this worker. No Minecraft, QA, harness, source generation or Foreman process ran. No blocked seam or additional contract request.
