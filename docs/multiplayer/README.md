@@ -1,7 +1,7 @@
 # Multiplayer AgentCraft
 
 > Type: how-to. Audience: the Claude Code coordinator, packet workers and the owner.
-> Updated: 2026-10-03 (MP-00: spike done, campaign planned). Companions: [audit](audit.md), [work packets](work-packets.md), [session resume](handoffs/session-resume.md), [deploy runbook](deploy.md), [MP-00 worknote](worknotes/MP-00.md), [original handoff](handoff-2026-10-03.md).
+> Updated: 2026-10-04 (Wave 1 written and reviewed; see the session resume). Companions: [audit](audit.md), [work packets](work-packets.md), [session resume](handoffs/session-resume.md), [deploy runbook](deploy.md), [MP-00 worknote](worknotes/MP-00.md), [original handoff](handoff-2026-10-03.md).
 
 ## Purpose
 
@@ -63,21 +63,21 @@ Proposed defaults are what the campaign builds against. The owner can change any
 | MP-T Game tests | Review | 0 | #1 | [MP-T](worknotes/MP-T.md) |
 | MP-B Baseline (Node ≥ 22.18) | Review | 0 | #2 | [MP-B](worknotes/MP-B.md) |
 | MP-H Two-client harness | Review | 0 | #4 | [MP-H](worknotes/MP-H.md) |
-| MP-01 Server mode and world rules | Review (reviewed and verified, no PR yet) | 1 | branch `mp/MP-01-server-mode` | on the branch |
-| MP-02 Build at an offset | Review (reviewed and verified, no PR yet) | 1 | branch `mp/MP-02-offset-build` | on the branch |
-| MP-03 Plots: registry, lifecycle, commands | Written, not reviewed | 1 | branch `mp/MP-03-plots` | on the branch |
-| MP-04 Layout sync | Review (reviewed; the two-client check waits for MP-03) | 1 | branch `mp/MP-04-layout-sync` | on the branch |
-| MP-05 Public-state publisher and redaction | Written, not reviewed | 1 | branch `mp/MP-05-publisher` | on the branch |
-| MP-06 Relay and presence | Ready | 1 | | |
-| MP-07 World intents | Ready | 1 | | |
-| MP-08 Multi-studio agents | Ready | 1 | | |
-| MP-09 Studio-aware displays | Written, not reviewed | 1 | branch `mp/MP-09-displays` | on the branch |
-| MP-10 Studio-aware stations | Ready | 1 | | |
-| MP-11 Visitor interactions | Written, not reviewed | 1 | branch `mp/MP-11-visitors` | on the branch |
-| MP-12 DevBridge in multiplayer | Ready | 1 | | |
-| MP-13 Plot protection | Ready | 1 | | |
-| MP-14 Deployment for multiplayer | Ready; the release pipeline is already done | 1 | | |
-| MP-I Integration | BlockedDependency (Wave 1) | 2 | | |
+| MP-01 Server mode and world rules | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-01-server-mode` | on the branch |
+| MP-02 Build at an offset | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-02-offset-build` | on the branch |
+| MP-03 Plots: registry, lifecycle, commands | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-03-plots` | on the branch |
+| MP-04 Layout sync | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-04-layout-sync` | on the branch |
+| MP-05 Public-state publisher and redaction | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-05-publisher` | on the branch |
+| MP-06 Relay and presence | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-06-relay` | on the branch |
+| MP-07 World intents | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-07-world-intents` | on the branch |
+| MP-08 Multi-studio agents | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-08-multi-studio-agents` | on the branch |
+| MP-09 Studio-aware displays | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-09-displays` | on the branch |
+| MP-10 Studio-aware stations | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-10-stations` | on the branch |
+| MP-11 Visitor interactions | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-11-visitors` | on the branch |
+| MP-12 DevBridge in multiplayer | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-12-dev-tools` | on the branch |
+| MP-13 Plot protection | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-13-plot-protection` | on the branch |
+| MP-14 Deployment for multiplayer | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-14-deploy` | on the branch |
+| MP-I Integration | Not started (Wave 1 is on `mp/integration`; it starts when the owner says so) | 2 | | |
 | MP-Z Close-out, UAT, colo deploy | BlockedDependency (MP-I) | 3 | | |
 
 ## Parallelization plan
