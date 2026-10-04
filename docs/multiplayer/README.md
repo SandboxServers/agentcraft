@@ -59,7 +59,8 @@ Proposed defaults are what the campaign builds against. The owner can change any
    - a visitor holding any item cannot open a door inside a plot;
    - structures completed from outside the margin that need blocks the owner placed across the edge (a nether portal, a golem or wither pattern) are left open; the eye of ender is closed;
    - not covered at all: water, lava and fire coming in from outside, a visitor's projectiles (closing that needs a second mixin, which the packet was not allowed), trampling.
-6. Two telemetry catalog points for the next edit of work-packets.md: `studio_event_rejected` should gain the reason `bad_version` (MP-06, #11, already emits it), and `plot_command` keeps its fields, so a refused command carries no `reason` (MP-03, #8).
+6. From the pull-request review: confirm that a server refuses to start when `plotStride` no longer matches its stored plots (the alternative is to send each plot's origin on the wire, a contract change); that the remote DevBridge commands stay behind `AGENTCRAFT_DEV_REMOTE=1`; and whether singleplayer should get back what MP-07's intent filter dropped (the `ci:<repoId>` lamp binding, CI lamps beyond eight repositories, lamps for agent ids over 16 characters).
+7. Two telemetry catalog points for the next edit of work-packets.md: `studio_event_rejected` should gain the reason `bad_version` (MP-06, #11, already emits it), and `plot_command` keeps its fields, so a refused command carries no `reason` (MP-03, #8).
 
 ## Packet status
 
