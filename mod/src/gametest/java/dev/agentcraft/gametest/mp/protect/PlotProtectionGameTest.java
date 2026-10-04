@@ -16,11 +16,16 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
 import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.network.protocol.game.ServerboundAttackPacket;
+import net.minecraft.network.protocol.game.ServerboundInteractPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
@@ -28,7 +33,12 @@ import net.minecraft.server.players.NameAndId;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.entity.decoration.ItemFrame;
+import net.minecraft.world.entity.decoration.painting.Painting;
+import net.minecraft.world.entity.decoration.painting.PaintingVariants;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
@@ -50,12 +60,14 @@ import net.minecraft.world.phys.Vec3;
 /**
  * Plot-protection game tests. Every action is driven through the same server
  * method the game uses ({@code ServerPlayerGameMode.destroyBlock}, {@code
- * useItemOn}, {@code useItem}), with the item really in the player's hand.
+ * useItemOn}, {@code useItem}, and the packet listener's {@code handleInteract}
+ * and {@code handleAttack} for entities), with the item really in the player's
+ * hand.
  *
  * <p>Plot 1 sits at the test structure's origin + (0,64,0), away from the
  * shared plot 0. {@link #run} wraps the whole test so config, plot directory,
- * ops, player-list entries and every changed block are restored in
- * {@code finally}, whatever the test did.</p>
+ * ops, player-list entries, every changed block and every spawned entity are
+ * restored in {@code finally}, whatever the test did.</p>
  */
 public class PlotProtectionGameTest {
 
@@ -69,6 +81,7 @@ public class PlotProtectionGameTest {
         final List<ServerPlayer> players = new ArrayList<>();
         final List<NameAndId> opped = new ArrayList<>();
         final Map<BlockPos, BlockState> saved = new LinkedHashMap<>();
+        final List<Entity> spawned = new ArrayList<>();
         final Set<UUID> preexistingItems = new HashSet<>();
         final AABB keepBox;
         Plot plot;
@@ -139,6 +152,13 @@ public class PlotProtectionGameTest {
             level.setBlockAndUpdate(pos, state);
         }
 
+        /** Adds an entity the fixture removes again in {@link #close}. */
+        <T extends Entity> T spawn(T entity) {
+            spawned.add(entity);
+            level.addFreshEntity(entity);
+            return entity;
+        }
+
         void snapshot(BlockPos from, BlockPos to) {
             for (int x = Math.min(from.getX(), to.getX()); x <= Math.max(from.getX(), to.getX()); x++) {
                 for (int y = Math.min(from.getY(), to.getY()); y <= Math.max(from.getY(), to.getY()); y++) {
@@ -175,6 +195,7 @@ public class PlotProtectionGameTest {
             for (Map.Entry<BlockPos, BlockState> e : saved.entrySet()) {
                 level.setBlockAndUpdate(e.getKey(), e.getValue());
             }
+            for (Entity entity : spawned) entity.discard();
             // Restoration can pop dropped items (an unsupported lily pad, a
             // bed's neighbour). Blocks first, then remove every item entity the
             // test created, leaving everything that was here at the start.
@@ -244,6 +265,34 @@ public class PlotProtectionGameTest {
     private static void aimAt(ServerPlayer player, ServerLevel level, double x, double y, double z, Vec3 target) {
         player.teleportTo(level, x, y, z, Set.of(), 0.0F, 0.0F, true);
         player.lookAt(EntityAnchorArgument.Anchor.EYES, target);
+    }
+
+    /** What the entity packet handlers require: an empty hand, in reach, and a client that has loaded. */
+    private static void reach(ServerPlayer player, Entity entity) {
+        player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        player.setPos(entity.getX(), entity.getY(), entity.getZ() - 1.5);
+        player.connection.handleAcceptPlayerLoad(new ServerboundPlayerLoadedPacket());
+    }
+
+    /** Right-clicks an entity through the packet handler, where Fabric fires its use callback. */
+    private static void useEntity(ServerPlayer player, Entity entity) {
+        reach(player, entity);
+        player.connection.handleInteract(new ServerboundInteractPacket(
+                entity.getId(), InteractionHand.MAIN_HAND, Vec3.ZERO, false));
+    }
+
+    /** Left-clicks an entity through the packet handler, which ends in {@code Player.attack}. */
+    private static void attackEntity(ServerPlayer player, Entity entity) {
+        reach(player, entity);
+        player.connection.handleAttack(new ServerboundAttackPacket(entity.getId()));
+    }
+
+    /** Sand aimed at {@code target}, which rests on stone, by clicking the stone block north of it. */
+    private static void placeSand(Fixture f, ServerPlayer player, BlockPos target) {
+        f.set(target, Blocks.AIR.defaultBlockState());
+        f.set(target.below(), Blocks.STONE.defaultBlockState());
+        f.set(target.north(), Blocks.STONE.defaultBlockState());
+        useOn(player, f.level, target.north(), Direction.SOUTH, new ItemStack(Items.SAND));
     }
 
     // ---- break ----
@@ -1301,6 +1350,173 @@ public class PlotProtectionGameTest {
                     4.0F, true, Level.ExplosionInteraction.NONE);
             helper.assertFalse(f.contains(from, to, Blocks.FIRE),
                     "a fiery explosion places no fire inside the plot");
+            helper.succeed();
+        });
+    }
+
+    // ---- the column above a plot (falling blocks) ----
+
+    @GameTest
+    public void visitorSandAbovePlotRefused(GameTestHelper helper) {
+        run(helper, f -> {
+            f.enableProtection();
+            ServerPlayer owner = f.owner();
+            ServerPlayer visitor = f.player();
+            // y=102 is the first block above the plot's box and its margin.
+            BlockPos low = f.at(0, 102, 0);
+            BlockPos top = low.atY(f.level.getMaxY());
+
+            try (var cap = MpLog.capture()) {
+                placeSand(f, visitor, low);
+                placeSand(f, visitor, top);
+                helper.assertTrue(f.level.getBlockState(low).isAir(), "no sand at y=102 above the plot");
+                helper.assertTrue(f.level.getBlockState(top).isAir(), "no sand at the build limit above it");
+                helper.assertTrue(cap.lines().contains(refusalLine(visitor, owner, 1, "place", low.north())),
+                        "the refusal reports the clicked position above the plot");
+            }
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void ownerSandAbovePlotAllowed(GameTestHelper helper) {
+        run(helper, f -> {
+            f.enableProtection();
+            ServerPlayer owner = f.owner();
+            BlockPos low = f.at(0, 102, 0);
+            BlockPos top = low.atY(f.level.getMaxY());
+
+            placeSand(f, owner, low);
+            placeSand(f, owner, top);
+            helper.assertTrue(f.level.getBlockState(low).is(Blocks.SAND), "the owner placed sand at y=102");
+            helper.assertTrue(f.level.getBlockState(top).is(Blocks.SAND), "and at the build limit");
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void visitorSandAboveOutsideAllowed(GameTestHelper helper) {
+        run(helper, f -> {
+            f.enableProtection();
+            f.owner();
+            // Two blocks out from the -z edge: outside the column and its margin.
+            BlockPos outside = f.at(0, 102, -38);
+
+            placeSand(f, f.player(), outside);
+            helper.assertTrue(f.level.getBlockState(outside).is(Blocks.SAND),
+                    "a visitor may place sand above ground two blocks outside the plot");
+            helper.succeed();
+        });
+    }
+
+    // ---- entities ----
+
+    private static ItemFrame frameWithItem(Fixture f) {
+        ItemFrame frame = f.spawn(new ItemFrame(f.level, f.at(0, 65, 0), Direction.UP));
+        frame.setItem(new ItemStack(Items.DIAMOND), false);
+        return frame;
+    }
+
+    private static ArmorStand armorStand(Fixture f) {
+        Vec3 feet = Vec3.atBottomCenterOf(f.at(2, 64, 0));
+        return f.spawn(new ArmorStand(f.level, feet.x, feet.y, feet.z));
+    }
+
+    private static Painting painting(Fixture f) {
+        return f.spawn(new Painting(f.level, f.at(4, 65, 0), Direction.NORTH, f.level.registryAccess()
+                .lookupOrThrow(Registries.PAINTING_VARIANT).getOrThrow(PaintingVariants.KEBAB)));
+    }
+
+    private static Entity chestMinecart(Fixture f, BlockPos pos) {
+        Entity cart = EntityTypes.CHEST_MINECART.create(f.level, EntitySpawnReason.COMMAND);
+        cart.setPos(Vec3.atBottomCenterOf(pos));
+        return f.spawn(cart);
+    }
+
+    /** A visitor's left-click and right-click on an entity inside the plot are refused and logged. */
+    private static void visitorEntityRefused(GameTestHelper helper, Function<Fixture, Entity> make,
+                                             Consumer<Entity> untouched) {
+        run(helper, f -> {
+            f.enableProtection();
+            ServerPlayer owner = f.owner();
+            ServerPlayer visitor = f.player();
+            Entity entity = make.apply(f);
+
+            try (var cap = MpLog.capture()) {
+                // Twice: an armor stand outside creative breaks on the second hit.
+                attackEntity(visitor, entity);
+                attackEntity(visitor, entity);
+                useEntity(visitor, entity);
+                helper.assertTrue(entity.isAlive(), "the entity survives a visitor's attack");
+                helper.assertFalse(visitor.hasContainerOpen(), "no menu opened");
+                untouched.accept(entity);
+                for (String action : List.of("break", "use")) {
+                    helper.assertTrue(cap.lines().contains(
+                                    refusalLine(visitor, owner, 1, action, entity.blockPosition())),
+                            "whole plot_edit_refused " + action + " line at the entity");
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void visitorItemFrameKeepsItem(GameTestHelper helper) {
+        visitorEntityRefused(helper, PlotProtectionGameTest::frameWithItem, entity -> {
+            ItemFrame frame = (ItemFrame) entity;
+            helper.assertTrue(frame.getItem().is(Items.DIAMOND), "the frame still holds its item");
+            helper.assertTrue(frame.getRotation() == 0, "the item is not rotated");
+        });
+    }
+
+    @GameTest
+    public void visitorArmorStandSurvives(GameTestHelper helper) {
+        visitorEntityRefused(helper, PlotProtectionGameTest::armorStand, entity -> {});
+    }
+
+    @GameTest
+    public void visitorPaintingSurvives(GameTestHelper helper) {
+        visitorEntityRefused(helper, PlotProtectionGameTest::painting, entity -> {});
+    }
+
+    @GameTest
+    public void visitorChestMinecartRefusedNoMenu(GameTestHelper helper) {
+        visitorEntityRefused(helper, f -> chestMinecart(f, f.at(0, 64, 0)), entity -> {});
+    }
+
+    @GameTest
+    public void ownerEntityActionsAllowed(GameTestHelper helper) {
+        run(helper, f -> {
+            f.enableProtection();
+            ServerPlayer owner = f.owner();
+            ItemFrame frame = frameWithItem(f);
+            ArmorStand stand = armorStand(f);
+            Painting painting = painting(f);
+            Entity cart = chestMinecart(f, f.at(6, 64, 0));
+
+            attackEntity(owner, frame);
+            helper.assertTrue(frame.getItem().isEmpty(), "the owner took the item out of the frame");
+            attackEntity(owner, stand);
+            attackEntity(owner, stand);
+            helper.assertFalse(stand.isAlive(), "the owner broke the armor stand");
+            attackEntity(owner, painting);
+            helper.assertFalse(painting.isAlive(), "the owner broke the painting");
+            useEntity(owner, cart);
+            helper.assertTrue(owner.hasContainerOpen(), "the owner opened the chest minecart");
+            helper.succeed();
+        });
+    }
+
+    @GameTest
+    public void visitorUsesEntityOutside(GameTestHelper helper) {
+        run(helper, f -> {
+            f.enableProtection();
+            f.owner();
+            ServerPlayer visitor = f.player();
+            // Two blocks out from the -z edge: outside the one-block margin.
+            useEntity(visitor, chestMinecart(f, f.at(0, 64, -38)));
+            helper.assertTrue(visitor.hasContainerOpen(),
+                    "a visitor may open a chest minecart two blocks outside the plot");
             helper.succeed();
         });
     }

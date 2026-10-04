@@ -8,16 +8,20 @@ import dev.agentcraft.mp.Plots;
 import java.util.Optional;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.permissions.Permissions;
+import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.BucketItem;
@@ -44,13 +48,15 @@ import net.minecraft.world.phys.Vec3;
  * the plot's owner and gamemasters, when a dedicated server has
  * {@code enabled && protectPlots} in the live config.
  *
- * <p>A position is protected when it is inside a plot or touches one, i.e. when
- * it or one of its six neighbours is inside the plot: a one-block margin so a
+ * <p>A position is protected when it is in a plot's column or beside it, i.e.
+ * within the plot's horizontal extent or one block around it: a margin so a
  * block just outside cannot pull a protected partner down (a bed's other half, a
  * torch on a wall block, sand on a support, a door's upper half) and an
  * explosion cannot take the boundary block that holds the protected one up. The
  * owner and gamemasters may edit the margin of their plot as they may edit the
- * plot.</p>
+ * plot. The column runs from one block below the plot's box to the top of the
+ * world, because sand, gravel, concrete powder or an anvil placed above a plot
+ * falls into it with no player event.</p>
  *
  * <p>The use rule for a player who may not edit the plot (the coordinator's
  * decisions under D-MP05): a right-click with a non-empty hand is refused when
@@ -63,6 +69,9 @@ import net.minecraft.world.phys.Vec3;
  * would then be placed inside. AgentCraft's own stations are handled
  * client-side and return FAIL there, so they never reach the server and need no
  * special case (audit A-11).</p>
+ *
+ * <p>Using or attacking an entity whose position is protected is refused for the
+ * same players, whatever they hold, unless the entity is another player.</p>
  *
  * <p>Explosion protection lives in {@code ServerExplosionMixin}, which calls
  * {@link #explosionProtects} before blocks are destroyed and before fire is
@@ -169,6 +178,14 @@ public final class PlotProtectionFeature {
             return InteractionResult.PASS;
         });
 
+        // ---- right-click and left-click an entity: chest minecarts and boats,
+        // item frames, armor stands, paintings. The catalog has no action for an
+        // attack; "break" is what a left-click does to them. ----
+        UseEntityCallback.EVENT.register((player, level, hand, entity, hitResult) ->
+                refuseEntity(player, level, entity, "use"));
+        AttackEntityCallback.EVENT.register((player, level, hand, entity, hitResult) ->
+                refuseEntity(player, level, entity, "break"));
+
         // Bound the throttle: a player on disconnect, everything on stop.
         // DISCONNECT can fire off the server thread, so hop back before mutating.
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
@@ -178,7 +195,7 @@ public final class PlotProtectionFeature {
 
     // ---- public helper for the explosion mixin ----
 
-    /** True when a block at this position inside a plot or its margin must survive an explosion. */
+    /** True when a block at this position in a plot's column or its margin must survive an explosion. */
     public static boolean explosionProtects(ServerLevel level, BlockPos pos) {
         if (!active(level)) return false;
         return protectedPlotAt(pos).isPresent();
@@ -259,6 +276,16 @@ public final class PlotProtectionFeature {
         return Optional.empty();
     }
 
+    /** FAIL when the entity stands on a protected position of a plot the player may not edit. */
+    private static InteractionResult refuseEntity(Player player, Level level, Entity entity, String action) {
+        if (!active(level) || entity instanceof Player) return InteractionResult.PASS;
+        BlockPos pos = entity.blockPosition();
+        Optional<Plot> foreign = foreignPlotAt(level, player, pos);
+        if (foreign.isEmpty()) return InteractionResult.PASS;
+        refuse(player, foreign.get(), action, pos);
+        return InteractionResult.FAIL;
+    }
+
     /** The empty-hand blocks a visitor may still work, so they can walk in. */
     private static boolean visitorMayUseEmptyHand(BlockState state) {
         Block block = state.getBlock();
@@ -269,18 +296,27 @@ public final class PlotProtectionFeature {
                 || block instanceof LeverBlock;
     }
 
-    /** The first plot that contains the position or one of its six neighbours (the margin). */
+    /**
+     * The plot whose column holds the position, else the first whose column it
+     * touches sideways (the margin). A column has no upper end and starts one
+     * block below the plot's box.
+     */
     private static Optional<Plot> protectedPlotAt(BlockPos pos) {
-        Optional<Plot> own = Plots.directory().plotAt(pos);
-        if (own.isPresent()) return own;
-        for (Direction direction : Direction.values()) {
-            Optional<Plot> neighbour = Plots.directory().plotAt(pos.relative(direction));
-            if (neighbour.isPresent()) return neighbour;
+        Plot beside = null;
+        for (Plot plot : Plots.directory().all()) {
+            int bottom = Mth.floor(plot.box().minY);
+            if (pos.getY() < bottom - 1) continue;
+            BlockPos floor = pos.atY(bottom);
+            if (plot.contains(floor)) return Optional.of(plot);
+            if (beside != null) continue;
+            for (Direction side : Direction.Plane.HORIZONTAL) {
+                if (plot.contains(floor.relative(side))) beside = plot;
+            }
         }
-        return Optional.empty();
+        return Optional.ofNullable(beside);
     }
 
-    /** The plot that protects the position (inside or touching it) and that this player may not edit. */
+    /** The plot that protects the position (in its column or beside it) and that this player may not edit. */
     private static Optional<Plot> foreignPlotAt(Level level, Player player, BlockPos pos) {
         Optional<Plot> plot = protectedPlotAt(pos);
         if (plot.isPresent() && !mayEdit(player, plot.get())) return plot;
