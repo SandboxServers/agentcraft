@@ -6,7 +6,6 @@ import com.google.gson.JsonObject;
 import dev.agentcraft.client.dev.DevBridge;
 import dev.agentcraft.client.dev.DevBridge.DevException;
 import dev.agentcraft.client.dev.Fields;
-import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.client.mp.Studios;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.Plot;
@@ -22,6 +21,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Optional;
 import java.util.UUID;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -57,14 +57,11 @@ public final class MpDevCommands {
 					}
 				}
 			});
-			// Leaving a server drops the mode to SINGLEPLAYER: those events belong to the server we left.
-			MpMode.addListener(mode -> {
-				if (mode == MpMode.SINGLEPLAYER) {
-					synchronized (EVENTS) {
-						EVENTS.clear();
-					}
-				}
-			});
+			// The ring holds one connection's events. A mode listener cannot scope it: events injected in
+			// singleplayer would survive, because joining or leaving there finds the mode already SINGLEPLAYER.
+			// Fabric may fire DISCONNECT on Netty, so both hooks hop to the client thread.
+			ClientPlayConnectionEvents.JOIN.register((handler, sender, mc) -> mc.execute(MpDevCommands::clearEvents));
+			ClientPlayConnectionEvents.DISCONNECT.register((handler, mc) -> mc.execute(MpDevCommands::clearEvents));
 		}
 		DevBridge.register("dev.mp.send", 10_000,
 			"{payload: public_state|studio_event|world_intent|hello, state?|event?|intent?|protocol+modVersion}"
@@ -76,6 +73,13 @@ public final class MpDevCommands {
 		DevBridge.register("dev.mp.relay", 10_000,
 			"{} - the client's last received states (studios) and events, and the current mode",
 			(req, mc) -> DevBridge.onClient(mc, MpDevCommands::relay));
+	}
+
+	/** Empty the received-event ring; runs on every play-connection join and disconnect. */
+	static void clearEvents() {
+		synchronized (EVENTS) {
+			EVENTS.clear();
+		}
 	}
 
 	// ------------------------------------------------------------------ pure parts

@@ -2,6 +2,7 @@ package dev.agentcraft.mp.dev;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.agentcraft.client.dev.DevBridge.DevException;
 import dev.agentcraft.client.dev.Fields;
@@ -122,14 +123,29 @@ class DevMpCommandsTest {
 		for (int i = 0; i < 40; i++) {
 			Studios.fireEvent(own, new PublicEvent.Say("kit", "user", null, i));
 		}
-		Method relay = MpDevCommands.class.getDeclaredMethod("relay");
-		relay.setAccessible(true);
-		JsonObject reply = (JsonObject) relay.invoke(null);
-		var events = reply.getAsJsonArray("events");
+		JsonArray events = relayEvents();
 		assertEquals(32, events.size());
 		// the oldest eight were dropped: what is left is events 8 to 39, in order
 		assertEquals(8, events.get(0).getAsJsonObject().get("length").getAsInt());
 		assertEquals(39, events.get(31).getAsJsonObject().get("length").getAsInt());
+	}
+
+	@Test void dev_mp_relay_is_emptied_by_the_clear_the_join_and_disconnect_hooks_call() throws Exception {
+		MpDevCommands.register();
+		// like dev.mp.fake in singleplayer: the mode is SINGLEPLAYER before and after, so no mode change follows
+		Studios.fireEvent(Anchors.self(), new PublicEvent.Say("kit", "user", null, 7));
+		assertFalse(relayEvents().isEmpty());
+		Method clear = MpDevCommands.class.getDeclaredMethod("clearEvents");
+		clear.setAccessible(true);
+		clear.invoke(null);
+		assertEquals(0, relayEvents().size());
+	}
+
+	/** The {@code events} array of a {@code dev.mp.relay} reply. */
+	private static JsonArray relayEvents() throws Exception {
+		Method relay = MpDevCommands.class.getDeclaredMethod("relay");
+		relay.setAccessible(true);
+		return ((JsonObject) relay.invoke(null)).getAsJsonArray("events");
 	}
 
 	private static RegistryFriendlyByteBuf buf() {
