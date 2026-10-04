@@ -16,15 +16,29 @@ import dev.agentcraft.client.foreman.Protocol.Agent;
 import dev.agentcraft.client.foreman.Protocol.DecisionKind;
 import dev.agentcraft.client.foreman.Protocol.Goal;
 import dev.agentcraft.client.foreman.Protocol.Repo;
+import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.client.world.ServerTasks;
 import dev.agentcraft.layout.Anchor;
 import dev.agentcraft.layout.AnchorNames;
 import dev.agentcraft.layout.Anchors;
+import dev.agentcraft.mp.net.ServerInfo;
+import dev.agentcraft.mp.net.WorldIntentC2S;
+import dev.agentcraft.mp.state.LampStatusWire;
+import dev.agentcraft.mp.state.MpText;
+import dev.agentcraft.mp.state.WorldIntent;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -41,8 +55,8 @@ import org.jspecify.annotations.Nullable;
  * <ul>
  *   <li>status lamps by binding: {@code agent:<id>} (the agent's status family, the same one its
  *       nameplate shows: an idle/done agent with a decision waiting on you is {@code waiting}; off
- *       when the agent is off shift or gone), {@code ci:<repoId>} or {@code ci:#<n>} (the n-th repo
- *       in Foreman order), {@code goal} / {@code goal:atrium} (the current goal), {@code decisions}
+ *       when the agent is off shift or gone), {@code ci:#<n>} (the n-th repo in Foreman order),
+ *       {@code goal} / {@code goal:atrium} (the current goal), {@code decisions}
  *       (waiting while any decision is open), {@code merge} (waiting while a merge decision is open);</li>
  *   <li>the decision podium {@code open} while any decision is open;</li>
  *   <li>merge stations {@code active} while a merge decision is open;</li>
@@ -53,6 +67,11 @@ import org.jspecify.annotations.Nullable;
  * Only blocks whose state differs are written. The set of wanted states is recomputed on every
  * Foreman change and re-applied every 2 s (so rebuilt or newly placed blocks pick it up). While the
  * Foreman link is down the blocks keep their last state (the view is stale, not wrong).
+ *
+ * <p>Singleplayer dispatches the world writes to the integrated server thread through
+ * {@link ServerTasks}; multiplayer sends a {@link WorldIntentC2S} snapshot instead. The decision
+ * logic lives in {@link #tick(ForemanState, Anchors.Layout, boolean, ServerInfo, Pacer, Applier)},
+ * which takes every dependency as an argument so tests need no client, network or world.
  */
 public final class HqWorldDriver {
 	private static final int RESYNC_TICKS = 40;
@@ -65,11 +84,24 @@ public final class HqWorldDriver {
 	record Wanted(Map<String, LampStatus> lamps, boolean podiumOpen, boolean mergeActive, Map<String, Boolean> monitorLit) {
 	}
 
-	private static @Nullable Wanted last;
+	/** Applies a computed snapshot; production dispatches to the integrated server, tests record it. */
+	@FunctionalInterface
+	interface Applier {
+		void apply(Wanted wanted, Anchors.Bounds bounds, List<BlockPos> podiumSignals, List<BlockPos> mergeSignals);
+	}
+
+	/** Podium override set by {@link dev.agentcraft.client.decisions.DecisionsFeature#syncPodium}:
+	 *  {@code null} = none, {@code true} = force open, {@code false} = force closed. */
+	private static @Nullable Boolean podiumOverride;
+	private static @Nullable Boolean lastOverride;
+	private static @Nullable WorldIntent lastIntent;
+	private static @Nullable Wanted lastWanted;
 	private static long lastRevision = -1;
 	private static long lastLayout = -1;
 	private static int ticks;
 	private static volatile int lastChanged;
+
+	private static final Pacer PACER = new Pacer(System::nanoTime, intent -> ClientPlayNetworking.send(new WorldIntentC2S(intent)));
 
 	private HqWorldDriver() {
 	}
@@ -79,35 +111,134 @@ public final class HqWorldDriver {
 		return lastChanged;
 	}
 
+	/** The last applied wanted state, for {@link HqClientFeature} and {@code dev.state.hq}. */
 	public static @Nullable Wanted wanted() {
-		return last;
+		return lastWanted;
+	}
+
+	/** Called from {@link dev.agentcraft.client.decisions.DecisionsFeature#syncPodium} with the
+	 *  renderer's wish (open decisions minus the ones being answered). {@code null} clears it. */
+	public static void setPodiumOverride(@Nullable Boolean override) {
+		// The renderer repeats its wish every frame. One that agrees with what the driver already shows
+		// is no override: storing it would make every tick recompute, only to drop it again.
+		if (override != null && podiumOverride == null && lastIntent != null && override == lastIntent.podiumOpen()) {
+			return;
+		}
+		podiumOverride = override;
+	}
+
+	/** Test seam: reset all static driver state. */
+	static void resetForTest() {
+		podiumOverride = null;
+		lastOverride = null;
+		lastIntent = null;
+		lastWanted = null;
+		lastRevision = -1;
+		lastLayout = -1;
+		ticks = 0;
+		lastChanged = 0;
+		PACER.clear();
 	}
 
 	static void tick(Minecraft mc) {
-		if (mc.level == null || mc.getSingleplayerServer() == null) {
+		if (mc.level == null) {
 			return;
 		}
-		ForemanState st = Foreman.state();
-		Anchors.Layout layout = Anchors.current();
+		boolean canSend = MpMode.current() == MpMode.MULTIPLAYER && ClientPlayNetworking.canSend(WorldIntentC2S.TYPE);
+		tick(Foreman.state(), Anchors.current(), canSend, MpMode.serverInfo().orElse(null), PACER, HqWorldDriver::applyThroughServer);
+	}
+
+	/** Queue the snapshot on the integrated server thread; a no-op on a remote server. */
+	private static void applyThroughServer(Wanted w, Anchors.Bounds b, List<BlockPos> podiumSignals, List<BlockPos> mergeSignals) {
+		ServerTasks.run(level -> lastChanged = apply(level, w, b, podiumSignals, mergeSignals));
+	}
+
+	/**
+	 * The driver's decision logic. {@code canSend} is true only in multiplayer after the server's
+	 * hello and with the channel open; {@code applier} performs the world work (production dispatches
+	 * it to the integrated server thread). Returns without doing anything when the state is missing,
+	 * stale or the layout is empty.
+	 */
+	static void tick(@Nullable ForemanState st, Anchors.Layout layout, boolean canSend, @Nullable ServerInfo info,
+			Pacer pacer, Applier applier) {
 		if (st == null || !st.hasData() || st.isStale() || layout.isEmpty() || layout.bounds() == null) {
 			return;
 		}
 		ticks++;
-		boolean changed = st.revision() != lastRevision || layout.revision() != lastLayout;
-		if (!changed && ticks % RESYNC_TICKS != 0) {
+		boolean revisionChanged = st.revision() != lastRevision || layout.revision() != lastLayout;
+		// A set, changed or cleared override passes the gate like a changed revision, so the podium
+		// reacts on the very next tick without waiting for the Foreman to move.
+		boolean overrideChanged = !Objects.equals(podiumOverride, lastOverride);
+		boolean resync = ticks % RESYNC_TICKS == 0;
+		if (!revisionChanged && !overrideChanged && !resync) {
+			// Quiet tick: retry an intent the rate limiter could not send.
+			if (canSend && info != null) {
+				pacer.flush(info.intentsPerSecond());
+			}
 			return;
 		}
-		Wanted w = changed || last == null ? compute(st) : last;
+		WorldIntent intent = applyPodiumOverride(compute(st, layout));
 		lastRevision = st.revision();
 		lastLayout = layout.revision();
-		boolean differs = !Objects.equals(w, last);
-		last = w;
-		if (differs || ticks % RESYNC_TICKS == 0) {
-			Anchors.Bounds b = layout.bounds();
-			List<BlockPos> podiumSignals = signalCenters(layout, AnchorNames.DECISION_PODIUM);
-			List<BlockPos> mergeSignals = signalCenters(layout, AnchorNames.MERGESTATION);
-			ServerTasks.run(level -> lastChanged = apply(level, w, b, podiumSignals, mergeSignals));
+		lastOverride = podiumOverride;
+		boolean contentDiffers = lastIntent == null || !contentEqual(intent, lastIntent);
+		lastIntent = intent;
+		Wanted w = intentToWanted(intent);
+		if (contentDiffers) {
+			lastWanted = w;
 		}
+		if (contentDiffers || resync) {
+			applier.apply(w, layout.bounds(),
+				signalCenters(layout, AnchorNames.DECISION_PODIUM),
+				signalCenters(layout, AnchorNames.MERGESTATION));
+		}
+		if (canSend && info != null) {
+			// Replace the pending snapshot with this tick's before spending a send slot, so a free
+			// slot always carries the newest state (not an older queued one).
+			if (contentDiffers || resync) {
+				pacer.offer(intent);
+			}
+			pacer.flush(info.intentsPerSecond());
+		}
+	}
+
+	/**
+	 * Replace the computed {@code podiumOpen} with the override while one is set; clear the
+	 * override when it agrees with the computed value, restoring {@code compute}'s single authority.
+	 */
+	static WorldIntent applyPodiumOverride(WorldIntent intent) {
+		Boolean override = podiumOverride;
+		if (override == null) {
+			return intent;
+		}
+		if (override.booleanValue() == intent.podiumOpen()) {
+			podiumOverride = null;
+			return intent;
+		}
+		return new WorldIntent(intent.rev(), intent.lamps(), override, intent.mergeActive(), intent.litMonitors());
+	}
+
+	/** True when the two intents show the same world, ignoring {@code rev}. */
+	static boolean contentEqual(WorldIntent a, WorldIntent b) {
+		return a.lamps().equals(b.lamps())
+			&& a.podiumOpen() == b.podiumOpen()
+			&& a.mergeActive() == b.mergeActive()
+			&& a.litMonitors().equals(b.litMonitors());
+	}
+
+	private static Wanted intentToWanted(WorldIntent intent) {
+		Map<String, LampStatus> lamps = new LinkedHashMap<>(intent.lamps().size() + intent.litMonitors().size());
+		intent.lamps().forEach((k, v) -> {
+			try {
+				lamps.put(k, LampStatus.valueOf(v.name()));
+			} catch (IllegalArgumentException ignored) {
+			}
+		});
+		Map<String, Boolean> monitorLit = new LinkedHashMap<>();
+		for (String id : intent.litMonitors()) {
+			monitorLit.put(id, Boolean.TRUE);
+		}
+		return new Wanted(Map.copyOf(lamps), intent.podiumOpen(), intent.mergeActive(), Map.copyOf(monitorLit));
 	}
 
 	/** Block positions of the anchors of a station (all its slots). */
@@ -161,29 +292,63 @@ public final class HqWorldDriver {
 		return LampStatus.forAgentState(a.state().wire());
 	}
 
-	static Wanted compute(ForemanState st) {
-		Map<String, LampStatus> lamps = new HashMap<>();
-		Map<String, Boolean> lit = new HashMap<>();
+	// ------------------------------------------------------------------ compute
+
+	/**
+	 * A pure snapshot of what the world should show, from the Foreman state alone.
+	 * {@code layout} is part of the signature for future callers; lamp colours come only from
+	 * {@link ForemanState}. Only keys that pass {@link WorldIntent#isBinding} are emitted:
+	 * {@code ci:<repoId>} is never sent, and {@code ci:#} is capped at 8. An active agent whose id
+	 * the wire cannot carry is left out of {@code litMonitors} rather than throwing.
+	 */
+	public static WorldIntent compute(ForemanState st, Anchors.Layout layout) {
+		Map<String, LampStatusWire> lamps = new LinkedHashMap<>();
+		Set<String> lit = new HashSet<>();
 		Map<String, String> waitingOn = awaiting(st);
 		for (Agent a : st.agents().values()) {
-			lamps.put("agent:" + a.id(), agentLamp(a, waitingOn.containsKey(a.id())));
-			lit.put(a.id(), a.isActive());
+			String aid = a.id();
+			String binding = "agent:" + aid;
+			if (WorldIntent.isBinding(binding)) {
+				lamps.put(binding, agentWire(a, waitingOn.containsKey(aid)));
+			}
+			if (a.isActive() && isSafeAgentId(aid)) {
+				lit.add(aid);
+			}
 		}
 		int n = 0;
 		for (Repo r : st.repos().values()) {
-			LampStatus ci = LampStatus.forCi(r.ci().wire());
-			lamps.put("ci:" + r.id(), ci);
-			lamps.put("ci:#" + (++n), ci);
+			if (++n > 8) {
+				break; // the record constructor refuses ci:#9
+			}
+			LampStatusWire ci = LampStatusWire.valueOf(LampStatus.forCi(r.ci().wire()).name());
+			lamps.put("ci:#" + n, ci);
 		}
-		LampStatus goal = goalLamp(st.goal());
+		LampStatus goalLampStatus = goalLamp(st.goal());
+		LampStatusWire goal = LampStatusWire.valueOf(goalLampStatus.name());
 		lamps.put("goal", goal);
 		lamps.put("goal:atrium", goal);
 		boolean open = !st.openDecisions().isEmpty();
-		lamps.put("decisions", open ? LampStatus.WAITING : LampStatus.OFF);
+		lamps.put("decisions", open ? LampStatusWire.WAITING : LampStatusWire.OFF);
 		boolean merge = st.oldestOpen(DecisionKind.MERGE) != null;
-		lamps.put("merge", merge ? LampStatus.WAITING : LampStatus.OFF);
-		lamps.put(BEACON_BINDING, beaconLamp(st, open, goal));
-		return new Wanted(Map.copyOf(lamps), open, merge, Map.copyOf(lit));
+		lamps.put("merge", merge ? LampStatusWire.WAITING : LampStatusWire.OFF);
+		LampStatusWire beacon = LampStatusWire.valueOf(beaconLamp(st, open, goalLampStatus).name());
+		lamps.put(BEACON_BINDING, beacon);
+		int rev;
+		try {
+			rev = Math.toIntExact(st.revision());
+		} catch (ArithmeticException e) {
+			rev = Integer.MAX_VALUE;
+		}
+		return new WorldIntent(rev, Map.copyOf(lamps), open, merge, Set.copyOf(lit));
+	}
+
+	/** An agent id safe to put in {@code litMonitors} (passes the record's constructor guard). */
+	static boolean isSafeAgentId(@Nullable String id) {
+		return id != null && !id.isEmpty() && id.length() <= 16 && id.equals(MpText.sanitize(id, 16));
+	}
+
+	private static LampStatusWire agentWire(Agent a, boolean awaitingUser) {
+		return LampStatusWire.valueOf(agentLamp(a, awaitingUser).name());
 	}
 
 	/** The cupola beacon's binding (the whole studio at a glance, seen from outside). */
@@ -325,5 +490,51 @@ public final class HqWorldDriver {
 			return s.setValue(MonitorBlock.LIT, lit != null && lit);
 		}
 		return null;
+	}
+
+	/**
+	 * Client-side send limiter and coalescer: keeps the newest unsent intent and sends it as soon as
+	 * fewer than {@code rate} sends happened in the last second. Caller-supplied clock, so tests can
+	 * advance time without sleeping. {@code offer} replaces the pending snapshot; {@code flush}
+	 * spends a free slot on it.
+	 */
+	static final class Pacer {
+		private final LongSupplier clock;
+		private final Consumer<WorldIntent> sender;
+		private final Deque<Long> sendTimes = new ArrayDeque<>();
+		private @Nullable WorldIntent pending;
+
+		Pacer(LongSupplier clock, Consumer<WorldIntent> sender) {
+			this.clock = clock;
+			this.sender = sender;
+		}
+
+		/** Replace the pending snapshot with {@code intent} (newest wins). */
+		void offer(WorldIntent intent) {
+			pending = intent;
+		}
+
+		/** Send the pending intent when the one-second window has room; keep it otherwise. */
+		void flush(int ratePerSecond) {
+			if (pending == null) {
+				return;
+			}
+			long now = clock.getAsLong();
+			long cutoff = now - 1_000_000_000L;
+			while (!sendTimes.isEmpty() && sendTimes.peekFirst() < cutoff) {
+				sendTimes.pollFirst();
+			}
+			if (sendTimes.size() >= ratePerSecond) {
+				return;
+			}
+			sender.accept(pending);
+			sendTimes.addLast(now);
+			pending = null;
+		}
+
+		void clear() {
+			sendTimes.clear();
+			pending = null;
+		}
 	}
 }
