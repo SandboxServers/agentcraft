@@ -5,6 +5,7 @@ import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
 import dev.agentcraft.mp.MpReasons;
 import dev.agentcraft.mp.Plot;
+import dev.agentcraft.mp.state.PublicAgent;
 import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicJson;
 import dev.agentcraft.mp.state.PublicPolicy;
@@ -190,18 +191,30 @@ public final class PublishScheduler {
             return;
         }
         loggedEventRate = false;
-        out.event(underCurrentPolicy(event));
+        out.event(asSentNow(event));
     }
 
     /**
-     * A held say can be older than the policy. Its text leaves the machine only while {@code sayText}
-     * is on at the moment it is sent; otherwise the text is cleared and the length kept.
+     * A held say can be older than the policy and than the state that was sent. Its text leaves the
+     * machine only while {@code sayText} is on at the moment it is sent; otherwise the text is cleared
+     * and the length kept. Its addressee is kept only while it is "user" or an agent in the state that
+     * was last sent, so no id goes out that the published state does not have.
      */
-    private PublicEvent underCurrentPolicy(PublicEvent event) {
-        if (event instanceof PublicEvent.Say say && say.text() != null && !policy.get().sayText()) {
-            return new PublicEvent.Say(say.agentId(), say.to(), null, say.length());
+    private PublicEvent asSentNow(PublicEvent event) {
+        if (!(event instanceof PublicEvent.Say say)) return event;
+        String text = policy.get().sayText() ? say.text() : null;
+        String to = say.to();
+        if (to != null && !"user".equals(to) && !published(to)) to = null;
+        if (Objects.equals(text, say.text()) && Objects.equals(to, say.to())) return event;
+        return new PublicEvent.Say(say.agentId(), to, text, say.length());
+    }
+
+    private boolean published(String agentId) {
+        if (last == null) return false;
+        for (PublicAgent agent : last.agents()) {
+            if (agent.id().equals(agentId)) return true;
         }
-        return event;
+        return false;
     }
 
     private void hold(PublicEvent event, int perSecond) {
