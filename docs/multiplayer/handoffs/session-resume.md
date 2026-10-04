@@ -16,26 +16,35 @@ MP-00 (the spike and the plan) and the pull-request CI are on `main`. The four W
 
 After #2 merges, update the other three from `main` so their CI runs go green.
 
-**Wave 1 is written.** All fourteen Wave 1 packets are branches on the fork, and `mp/integration` contains all of them. `mp/integration` is `main` plus the four Wave 0 branches plus the Wave 1 branches, each merged with its own merge commit; it is a place to build and test everything together, never a branch to merge. At `fc06bbc` it builds with 238 JUnit tests and 102 game tests passing. Each Wave 1 branch is an open pull request against `main` (#6 to #19) with the owner requested as reviewer. Each is stacked on the four Wave 0 pull requests, so its diff also shows their changes until they merge; every description links the comparison from the Wave 0 base, which is the packet's own change.
+**Wave 1 is written.** All fourteen Wave 1 packets are branches on the fork, and `mp/integration` contains all of them. `mp/integration` is `main` plus the four Wave 0 branches plus the Wave 1 branches, each merged with its own merge commit; it is a place to build and test everything together, never a branch to merge. At `268f9ae`, with the fixes from the pull-request review merged again, it builds with 289 JUnit tests and 115 game tests passing, and the tools suite has 70 tests. Each Wave 1 branch is an open pull request against `main` (#6 to #19) with the owner requested as reviewer. Each is stacked on the four Wave 0 pull requests, so its diff also shows their changes until they merge; every description links the comparison from the Wave 0 base, which is the packet's own change.
 
 What "reviewed and verified" means for every packet in the table: a worker model wrote it inside a sandbox; the coordinator read every hunk against the packet's Decisions and its row of the file-ownership matrix; a second model reviewed it (an independent security review for the packets marked **(sec)**); the findings went back to a writer as one numbered brief, were fixed and were reviewed again; the last small findings were corrected by the coordinator, and for the security packets the security reviewer then confirmed the final state; and the coordinator ran `gradlew test --rerun --no-build-cache` and `gradlew build` (JUnit and the game tests) on the result. The first lines of each worknote give its status and name what is still owed.
 
 | Packet | PR | Branch | JUnit / game tests | Still owed |
 |---|---|---|---|---|
 | MP-01 Server mode and world rules | #6 | `mp/MP-01-server-mode` | 49 / 6 | Nothing new: its live dedicated-server checks were seen when it was reviewed |
-| MP-02 Build at an offset | #7 | `mp/MP-02-offset-build` | 46 / 11 | A build on a second plot of a live server (MP-I) |
-| MP-03 Plots: registry, lifecycle, commands **(sec)** | #8 | `mp/MP-03-plots` | 63 / 28 | The live dedicated-server checks in its worknote (a join allocates and builds, the commands, a restart keeps the plots) |
-| MP-04 Layout sync | #9 | `mp/MP-04-layout-sync` | 54 / 2 | The two-client check |
-| MP-05 Public-state publisher and redaction **(sec)** | #10 | `mp/MP-05-publisher` | 90 / 2 | The live checks in its worknote; the leak scan of relayed bytes is MP-I's |
-| MP-06 Relay and presence **(sec)** | #11 | `mp/MP-06-relay` | 94 / 4 | The two-client harness checks in its worknote |
-| MP-07 World intents **(sec)** | #12 | `mp/MP-07-world-intents` | 70 / 10 | The harness checks in its worknote (a remote studio's lamps follow its owner's Foreman) |
-| MP-08 Multi-studio agents | #13 | `mp/MP-08-multi-studio-agents` | 54 / 2 | The two-client look; the plate-layout timing figure and the speech-bubble look were not examined |
-| MP-09 Studio-aware displays | #14 | `mp/MP-09-displays` | 60 / 2 | The two-client look (a real remote studio instead of the overlay) |
+| MP-02 Build at an offset | #7 | `mp/MP-02-offset-build` | 46 / 12 | A build on a second plot of a live server (MP-I) |
+| MP-03 Plots: registry, lifecycle, commands **(sec)** | #8 | `mp/MP-03-plots` | 69 / 31 | The live dedicated-server checks in its worknote (a join allocates and builds, the commands, a restart keeps the plots) |
+| MP-04 Layout sync | #9 | `mp/MP-04-layout-sync` | 57 / 2 | The two-client check |
+| MP-05 Public-state publisher and redaction **(sec)** | #10 | `mp/MP-05-publisher` | 99 / 2 | The live checks in its worknote; the leak scan of relayed bytes is MP-I's |
+| MP-06 Relay and presence **(sec)** | #11 | `mp/MP-06-relay` | 101 / 4 | The two-client harness checks in its worknote |
+| MP-07 World intents **(sec)** | #12 | `mp/MP-07-world-intents` | 71 / 10 | The harness checks in its worknote (a remote studio's lamps follow its owner's Foreman) |
+| MP-08 Multi-studio agents | #13 | `mp/MP-08-multi-studio-agents` | 58 / 2 | The two-client look; the plate-layout timing figure and the speech-bubble look were not examined |
+| MP-09 Studio-aware displays | #14 | `mp/MP-09-displays` | 67 / 2 | The two-client look (a real remote studio instead of the overlay) |
 | MP-10 Studio-aware stations | #15 | `mp/MP-10-stations` | 53 / 2 | The two-client look |
-| MP-11 Visitor interactions | #16 | `mp/MP-11-visitors` | 52 / 2 | The two-client checks in its worknote |
-| MP-12 DevBridge in multiplayer | #17 | `mp/MP-12-dev-tools` | 55 / 2 | The harness checks in its worknote (remote camera, remote command, `dev.mp.send` on a real server) |
-| MP-13 Plot protection **(sec)** | #18 | `mp/MP-13-plot-protection` | 50 / 53 | The live protection checks with two players; the owner's decision on the known limits in its worknote |
+| MP-11 Visitor interactions | #16 | `mp/MP-11-visitors` | 57 / 2 | The two-client checks in its worknote |
+| MP-12 DevBridge in multiplayer | #17 | `mp/MP-12-dev-tools` | 60 / 2 | The harness checks in its worknote (remote camera, remote command, `dev.mp.send` on a real server) |
+| MP-13 Plot protection **(sec)** | #18 | `mp/MP-13-plot-protection` | 50 / 62 | The live protection checks with two players; the owner's decision on the known limits in its worknote |
 | MP-14 Deployment for multiplayer | #19 | `mp/MP-14-deploy` | 46 / 2 | A release-workflow run with the new smoke assertions (the owner starts it) |
+
+**The pull-request review (2026-10-04).** An automated reviewer commented on every pull request and the owner's reviewer wrote one document for all of them. Each finding was checked against the code first, fixed on the packet's own branch with a test that failed before the fix, and verified again (JUnit and game tests); the fixes of the security packets had their own security re-review. Two pull requests were marked blocking and are fixed:
+
+- #13 (MP-08): a remote player's skin name went straight into a resource identifier, which throws on most characters, so it crashed every viewer in range. The skin lookup never throws now and is bounded, and the foundation refuses such a name at decode and where a record is built.
+- #17 (MP-12): the DevBridge is on by default in the jar a player installs, and its commands could act on a shared server with the player's rights. The remote paths now need `AGENTCRAFT_DEV_REMOTE=1` in the game's environment, which only the harness sets; the player guide tells players to switch the DevBridge off.
+
+The other fixes, by pull request: #5 the hello survives a protocol change (the protocol is read first, the rest skipped), caps and the agent id and skin character rule are enforced where a record is built, telemetry values lose Unicode separators and format controls; #4 the harness lock takeover, a save before a Windows server stops (RCON on loopback), cleanup that no longer depends on the launch environment, a log cursor that sees a replaced log, a signal only for a process that still carries the run's marker; #8 the server refuses to start on a plot registry it cannot trust (corrupt file, any rejected row, a stride that no longer matches the stored plots), overlapping stored plots, `hq` builds only the default studio in multiplayer; #18 protection covers the whole column above a plot and the non-player entities in it; #11 the rate bucket is consulted first and refusal logs are throttled; #10 a refused state is sent again; #16 in multiplayer a station click outside the own studio opens nothing of the viewer's; #9 an emptied layout is withdrawn; #14 remote displays follow panel and look changes and show a remote wall offline; #7 two tests that could not fail; #1 the game tests run once in CI; #19 the player guide and a warning in the runbook that the first player on plot 0 rebuilds the HQ at the origin.
+
+Not changed, with the reason: the typed-value policy for telemetry (an open owner decision); one automated comment on #15 that does not hold in 26.3 (a block-entity render state is created fresh every frame); the reviewer's note that game tests cannot reach multiplayer server code (Fabric's game-test API makes the game-test server report itself as dedicated, and the multiplayer server tests rely on it). Seen in a game window after the fixes: the QA compare, the overlay checks again, a non-path skin refused, a missing skin drawn with the default, a changed skin applied to the same entity, and the visitor task-wall panel cut to the screen with "+ N more". Still not run by anyone: the harness on Windows or against a real server, and every two-client check.
 
 **The review record.** Findings are counted per pass: the first review, then each re-review after a fix round. "Coordinator" is the coordinating session, which read every hunk of every packet; the security reviewer and the second model are different models from the writer and from each other.
 
@@ -60,7 +69,7 @@ Two things about that record that a reader should know. Every fix round ran on o
 
 **What has been seen in a game window, and what has not.** Seen, in a singleplayer dev client on `mp/integration`:
 
-- the singleplayer QA compare (`tools/qa.mjs`, ten shots) against a reference shot on the same display at the Wave 1 base: no shot moved, at five points while the packets were merged, the last one with all fourteen in; the singleplayer client logged no `agentcraft.mp` line;
+- the singleplayer QA compare (`tools/qa.mjs`, ten shots) against a reference shot on the same display at the Wave 1 base: no shot moved, at six points: five while the packets were merged and one after the pull-request review fixes; the singleplayer client logged no `agentcraft.mp` line;
 - the remote looks through the `dev.mp.fake` overlay: the monitors and the task wall (MP-09), the podium, merge station, archive, console and hologram (MP-10), the visitor panel and the read-only agent card (MP-11), and the remote agents with their plates, their waiting spot and the dimmed "Foreman offline" state (MP-08);
 - `dev.mp.send` refusing in singleplayer, and `dev.state` reporting the mode, the studios and no plot (MP-12).
 
@@ -70,6 +79,8 @@ Not seen by anyone, and still owed before any of this is called done: **every ch
 
 - `studio_event_rejected` needs the reason `bad_version` in the telemetry catalog (MP-06 refuses an event from a sender without an accepted hello with it).
 - `plot_command` keeps its catalog fields: a refused command carries no `reason` (decided during MP-03's review).
+- The pull-request review changed the contract text in three places, already edited in work-packets.md on the foundation branch: the hello's protocol-first rule, caps refused where a record is built, and the identifier-path rule for an agent's id and skin.
+- Decisions taken in the pull-request review that the owner should confirm: a server refuses to start when `plotStride` no longer matches the stored plots (instead of sending each plot's origin on the wire); the remote DevBridge commands need `AGENTCRAFT_DEV_REMOTE=1`; plot protection covers the column above a plot and non-player entities.
 - MP-13 took three decisions under D-MP05 that the owner should confirm: with an empty hand a visitor may use only doors, trapdoors, fence gates, buttons and levers inside a plot; protection covers a margin of one block around each plot, because beds, doors and attached blocks reach across the edge (a visitor can neither place nor break a block that touches someone else's plot); and structures completed from outside the margin that need blocks the owner placed across the plot's edge (a nether portal, a golem or wither pattern) are left open, while the eye of ender is closed. Its worknote lists what protection does not cover (fluids and fire from outside, projectiles, trampling); closing the projectile case needs a second mixin, which the packet was not allowed.
 
 **What the reviews found**, so that the next reviewer knows what to look for:
