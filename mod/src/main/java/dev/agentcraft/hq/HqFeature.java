@@ -111,8 +111,10 @@ public final class HqFeature {
 			options = new HqBuilder.Options(force);
 		}
 		Anchors.Layout layout;
+		// In multiplayer the plot is always in the overworld, wherever the caller stands.
+		ServerLevel level = PlotFeature.multiplayer(source.getServer()) ? source.getServer().overworld() : source.getLevel();
 		try {
-			layout = buildAndPublish(source.getLevel(), builder, options);
+			layout = buildAndPublish(level, builder, options);
 		} catch (RuntimeException e) {
 			AgentCraft.LOGGER.error("HQ builder '{}' failed", id, e);
 			ctx.getSource().sendFailure(Component.literal("HQ builder '" + id + "' failed: " + e));

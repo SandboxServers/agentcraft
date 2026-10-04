@@ -5,6 +5,7 @@ import dev.agentcraft.layout.AnchorNames;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.MpLog;
 import dev.agentcraft.mp.MpServerConfig;
+import dev.agentcraft.mp.Plot;
 import dev.agentcraft.mp.PlotGrid;
 import dev.agentcraft.mp.Plots;
 import dev.agentcraft.mp.StudioId;
@@ -12,7 +13,9 @@ import dev.agentcraft.mp.net.HelloS2C;
 import dev.agentcraft.mp.net.MpPayloads;
 import dev.agentcraft.mp.server.plot.PlotCommands;
 import dev.agentcraft.mp.server.plot.PlotFeature;
+import dev.agentcraft.mp.server.plot.PlotRebuilds;
 import dev.agentcraft.mp.server.plot.PlotRegistry;
+import dev.agentcraft.mp.server.plot.PlotSpawn;
 import dev.agentcraft.mp.server.plot.PlotStore;
 import java.util.UUID;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
@@ -20,6 +23,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelData;
 
 public final class PlotLifecycleGameTest {
@@ -162,5 +166,194 @@ public final class PlotLifecycleGameTest {
         } finally {
             PlotGameSupport.close(helper, session);
         }
+    }
+
+    @GameTest
+    public void homeAndRespawnUseTheOverworld(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            var nether = server.getLevel(Level.NETHER);
+            if (nether == null) {
+                helper.fail("the game-test server has no Nether dimension");
+                return;
+            }
+            ServerPlayer player = PlotGameSupport.mockIn(server, nether);
+            helper.assertValueEqual(player.level().dimension(), Level.NETHER, "the mock starts in the Nether");
+            helper.assertTrue(PlotFeature.allocate(server, player.getUUID()), "the player has a plot");
+            publishSpawn(StudioId.of(player.getUUID()), 12.5, 70, 12.5);
+            helper.assertValueEqual(PlotCommands.home(PlotGameSupport.player(server, player, false)), 1, "home succeeds");
+            // The connection-less mock keeps its own level; the chosen home level and the respawn record
+            // are the observable rules. Production players have a connection and a real cross-level move.
+            helper.assertTrue(PlotSpawn.homeLevel(player) == server.overworld(), "home targets the overworld");
+            var respawn = player.getRespawnConfig();
+            if (respawn == null) {
+                helper.fail("home set no respawn");
+                return;
+            }
+            helper.assertValueEqual(respawn.respawnData().dimension(), Level.OVERWORLD, "respawn dimension");
+            helper.assertValueEqual(respawn.respawnData().pos(), BlockPos.containing(12.5, 70, 12.5), "respawn position");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void startPublishesLayoutsAndQueuesUnbuilt(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.BUILDING);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            UUID a = UUID.randomUUID();
+            UUID b = UUID.randomUUID();
+            PlotRegistry seeded = new PlotRegistry();
+            seeded.restore(new Plot(0, StudioId.of(a), BlockPos.ZERO));
+            seeded.restore(new Plot(1, StudioId.of(b), PlotGrid.originOf(1, 128)));
+            helper.assertTrue(PlotStore.save(PlotFeature.worldRoot(server), seeded.all()), "plots.json written");
+            Anchor spawn = new Anchor(AnchorNames.SPAWN, 1.5, 70, 3.5, 90, 0);
+            Anchors.Layout saved = new Anchors.Layout("studio", 7, null, java.util.Map.of(AnchorNames.SPAWN, spawn));
+            helper.assertTrue(PlotStore.saveAnchors(PlotFeature.worldRoot(server), 0, saved), "anchors written for plot 0");
+
+            PlotFeature.start(server);
+            helper.assertTrue(Plots.directory() instanceof PlotRegistry, "the registry is installed");
+            PlotRegistry registry = (PlotRegistry) Plots.directory();
+            helper.assertValueEqual(registry.all().size(), 2, "both rows loaded");
+            helper.assertTrue(!Anchors.forStudio(StudioId.of(a)).isEmpty(), "A's layout is published");
+            helper.assertValueEqual(Anchors.forStudio(StudioId.of(a)).get(AnchorNames.SPAWN).y(), 70.0, "the saved layout was loaded");
+            helper.assertValueEqual(Anchors.forStudio(StudioId.of(a)).revision(), 7L, "the saved revision is preserved");
+            helper.assertTrue(PlotFeature.buildPending(1), "the plot without anchors is queued");
+            helper.assertFalse(PlotFeature.buildPending(0), "the built plot is not queued");
+
+            // INIT for the same owner queues the build again without allocating or logging again.
+            PlotFeature.resetPending();
+            try (var capture = MpLog.capture()) {
+                helper.assertFalse(PlotFeature.allocate(server, b), "an existing owner is not allocated again");
+                helper.assertTrue(PlotFeature.buildPending(1), "INIT resumes the build");
+                helper.assertTrue(capture.lines().stream().noneMatch(line -> line.startsWith("event=plot_allocated ")),
+                    "no second plot_allocated line");
+            }
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void allocatedJoinTeleportsAndRejoinDoesNot(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer player = PlotGameSupport.onlineMock(helper, session);
+            // The login fires the real INIT handler, which allocates plot 0 for this player.
+            helper.assertTrue(Plots.directory().plotOf(StudioId.of(player.getUUID())).isPresent(), "the joining player is allocated");
+            publishSpawn(StudioId.of(player.getUUID()), 10.5, 70, 10.5);
+            player.absSnapTo(0, 64, 0, 0, 0);
+
+            PlotFeature.onJoin(server, player.getUUID());
+            PlotFeature.tick(server);
+            helper.assertValueEqual(player.getX(), 10.5, "the allocating join moved the player home");
+
+            player.absSnapTo(0, 64, 0, 0, 0);
+            PlotFeature.onJoin(server, player.getUUID());
+            PlotFeature.tick(server);
+            helper.assertValueEqual(player.getX(), 0.0, "a later join did not move the player");
+            var respawn = player.getRespawnConfig();
+            if (respawn == null) {
+                helper.fail("the returning join set no respawn");
+                return;
+            }
+            helper.assertValueEqual(respawn.respawnData().dimension(), Level.OVERWORLD, "respawn dimension");
+            helper.assertValueEqual(respawn.respawnData().pos(), BlockPos.containing(10.5, 70, 10.5), "respawn position");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void unbuiltJoinThenLaterLayoutDoesNotTeleport(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer player = PlotGameSupport.onlineMock(helper, session);
+            helper.assertTrue(Plots.directory().plotOf(StudioId.of(player.getUUID())).isPresent(), "the joining player is allocated");
+            player.absSnapTo(0, 64, 0, 0, 0);
+
+            // The first join finds no layout and no pending build (autoBuild is off): the allocating
+            // mark must be dropped here, not kept for a later join.
+            PlotFeature.onJoin(server, player.getUUID());
+            PlotFeature.tick(server);
+            publishSpawn(StudioId.of(player.getUUID()), 10.5, 70, 10.5);
+
+            PlotFeature.onJoin(server, player.getUUID());
+            PlotFeature.tick(server);
+            helper.assertValueEqual(player.getX(), 0.0, "the later join did not move the player");
+            var respawn = player.getRespawnConfig();
+            if (respawn == null) {
+                helper.fail("the later join set no respawn");
+                return;
+            }
+            helper.assertValueEqual(respawn.respawnData().dimension(), Level.OVERWORLD, "respawn dimension");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void openAndCloseRestoreTheRebuildSnapshot(GameTestHelper helper) {
+        var original = PlotRebuilds.snapshot();
+        try {
+            UUID id = UUID.randomUUID();
+            PlotRebuilds.note(id, 5);
+            var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+            boolean closed = false;
+            try {
+                helper.assertFalse(PlotRebuilds.snapshot().containsKey(id), "open clears the shared bookkeeping");
+                closed = true;
+                PlotGameSupport.close(helper, session);
+                helper.assertTrue(PlotRebuilds.snapshot().containsKey(id), "close restores what open found");
+                helper.assertValueEqual(PlotRebuilds.snapshot().get(id), 5, "the stored tick is restored");
+                helper.succeed();
+            } finally {
+                if (!closed) PlotGameSupport.close(helper, session);
+            }
+        } finally {
+            // Put back exactly the records that existed before this test, not an empty map, whatever
+            // open or close threw.
+            PlotRebuilds.install(original);
+        }
+    }
+
+    @GameTest(environment = "agentcraft:plot_multiplayer", maxTicks = 400)
+    public void queuedBuildFinishesAcrossTicks(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.BUILDING);
+        MinecraftServer server = helper.getLevel().getServer();
+        UUID owner = UUID.randomUUID();
+        try {
+            helper.assertTrue(PlotFeature.allocate(server, owner), "allocate queues a build");
+            helper.assertTrue(Anchors.forStudio(StudioId.of(owner)).isEmpty(), "no layout in the same tick");
+            helper.assertTrue(PlotFeature.buildPending(0), "the build is queued");
+        } catch (RuntimeException e) {
+            PlotGameSupport.close(helper, session);
+            throw e;
+        }
+        // Its own environment keeps this multi-tick test out of the singleplayer batch.
+        helper.runAfterDelay(120, () -> {
+            try {
+                helper.assertFalse(PlotFeature.buildPending(0), "the queue is empty");
+                Anchors.Layout layout = Anchors.forStudio(StudioId.of(owner));
+                helper.assertValueEqual(layout.anchors().size(), 69, "69 anchors published");
+                helper.assertTrue(PlotStore.loadAnchors(PlotFeature.worldRoot(server), 0).isPresent(), "anchors saved");
+            } finally {
+                PlotGameSupport.close(helper, session);
+            }
+            helper.succeed();
+        });
+    }
+
+    private static void publishSpawn(StudioId studio, double x, double y, double z) {
+        Anchors.publish(studio, new Anchors.Layout("studio", 5, null,
+            java.util.Map.of(AnchorNames.SPAWN, new Anchor(AnchorNames.SPAWN, x, y, z, 0, 0))));
     }
 }

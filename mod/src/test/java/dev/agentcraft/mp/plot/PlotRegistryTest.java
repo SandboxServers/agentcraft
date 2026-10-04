@@ -17,6 +17,7 @@ import dev.agentcraft.mp.net.HelloS2C;
 import dev.agentcraft.mp.net.MpPayloads;
 import dev.agentcraft.mp.server.plot.PlotCommands;
 import dev.agentcraft.mp.server.plot.PlotFeature;
+import dev.agentcraft.mp.server.plot.PlotRebuilds;
 import dev.agentcraft.mp.server.plot.PlotRegistry;
 import dev.agentcraft.mp.server.plot.PlotStore;
 import java.nio.file.Files;
@@ -236,6 +237,65 @@ class PlotRegistryTest {
             assertFalse(result.created());
             assertTrue(capture.lines().isEmpty());
             assertTrue(registry.all().isEmpty());
+        }
+    }
+
+    @Test
+    void plot_origin_bounds_reject_integer_min_and_accept_the_boundary(@TempDir Path dir) throws Exception {
+        // Integer.MIN_VALUE must be rejected on both axes: Math.abs is negative but MIN % 16 == 0.
+        assertTrue(loadOne(dir, Integer.MIN_VALUE, 0).plots().isEmpty());
+        assertTrue(loadOne(dir, 0, Integer.MIN_VALUE).plots().isEmpty());
+        assertEquals(1, loadOne(dir, Integer.MIN_VALUE, 0).skipped());
+        assertEquals(1, loadOne(dir, 0, Integer.MIN_VALUE).skipped());
+        // The signed boundaries themselves are valid: ±30_000_000 are multiples of 16.
+        assertEquals(-30_000_000, loadOne(dir, -30_000_000, 0).plots().get(0).origin().getX());
+        assertEquals(30_000_000, loadOne(dir, 30_000_000, 0).plots().get(0).origin().getX());
+        assertEquals(-30_000_000, loadOne(dir, 0, -30_000_000).plots().get(0).origin().getZ());
+        assertEquals(30_000_000, loadOne(dir, 0, 30_000_000).plots().get(0).origin().getZ());
+        // One step outside is rejected on both axes in both directions.
+        assertTrue(loadOne(dir, 30_000_016, 0).plots().isEmpty());
+        assertTrue(loadOne(dir, -30_000_016, 0).plots().isEmpty());
+        assertTrue(loadOne(dir, 0, 30_000_016).plots().isEmpty());
+        assertTrue(loadOne(dir, 0, -30_000_016).plots().isEmpty());
+    }
+
+    @Test
+    void a_rejected_row_does_not_reserve_its_index(@TempDir Path dir) throws Exception {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        Path file = PlotStore.plotsFile(dir);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "{\"plots\":["
+            + "{\"index\":0,\"owner\":\"" + a + "\",\"x\":0,\"y\":0,\"z\":0},"
+            + "{\"index\":1,\"owner\":\"" + a + "\",\"x\":16,\"y\":0,\"z\":0},"
+            + "{\"index\":1,\"owner\":\"" + b + "\",\"x\":16,\"y\":0,\"z\":0}]}");
+        PlotStore.Loaded loaded = PlotStore.load(dir);
+        assertFalse(loaded.failed());
+        assertEquals(2, loaded.plots().size());
+        assertEquals(1, loaded.skipped());
+        assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 1 && plot.owner().equals(StudioId.of(b))),
+            "the valid third row is accepted after the second is rejected for its owner");
+        assertTrue(loaded.plots().stream().anyMatch(plot -> plot.index() == 0 && plot.owner().equals(StudioId.of(a))));
+    }
+
+    private static PlotStore.Loaded loadOne(Path dir, int x, int z) throws Exception {
+        UUID owner = UUID.randomUUID();
+        assertTrue(PlotStore.save(dir, List.of(new Plot(0, StudioId.of(owner), new BlockPos(x, 0, z)))));
+        return PlotStore.load(dir);
+    }
+
+    @Test
+    void rebuild_window_ends_after_exactly_1200_ticks() {
+        UUID id = UUID.randomUUID();
+        PlotRebuilds.clear();
+        try {
+            PlotRebuilds.note(id, 1000);
+            assertFalse(PlotRebuilds.allowed(id, 1000 + 1199), "1199 ticks is still inside the window");
+            assertTrue(PlotRebuilds.allowed(id, 1000 + 1200), "1200 ticks ends the window");
+            assertEquals(1, PlotRebuilds.remainingSeconds(id, 1000 + 1199));
+            assertEquals(0, PlotRebuilds.remainingSeconds(id, 1000 + 1200));
+        } finally {
+            PlotRebuilds.clear();
         }
     }
 }

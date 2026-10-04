@@ -13,6 +13,8 @@ import dev.agentcraft.mp.StudioId;
 import dev.agentcraft.mp.server.StudioRange;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -30,11 +32,13 @@ public final class PlotFeature {
 
     private static final ArrayDeque<Pending> BUILDS = new ArrayDeque<>();
     private static final ArrayDeque<UUID> SPAWNS = new ArrayDeque<>();
+    /** Players whose plot was allocated in this session and who have not been moved in yet. */
+    private static final Set<UUID> JUST_ALLOCATED = new HashSet<>();
 
     private PlotFeature() {}
 
     public static void init() {
-        ServerLifecycleEvents.SERVER_STARTED.register(PlotFeature::onStarted);
+        ServerLifecycleEvents.SERVER_STARTED.register(PlotFeature::start);
         ServerLifecycleEvents.SERVER_STOPPED.register(PlotFeature::onStopped);
         // INIT runs from the play-listener constructor, before JOIN. The uuid is the connection's player.
         ServerPlayConnectionEvents.INIT.register((handler, server) -> {
@@ -42,11 +46,10 @@ public final class PlotFeature {
             if (player != null) allocate(server, player.getUUID());
         });
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
-            if (!multiplayer(server)) return;
             ServerPlayer player = handler.getPlayer();
-            if (player != null) SPAWNS.add(player.getUUID());
+            if (player != null) onJoin(server, player.getUUID());
         });
-        ServerTickEvents.END_SERVER_TICK.register(PlotFeature::onTick);
+        ServerTickEvents.END_SERVER_TICK.register(PlotFeature::tick);
         AgentCraftCommands.sub(PlotCommands::register);
     }
 
@@ -63,22 +66,40 @@ public final class PlotFeature {
         return server.getWorldPath(LevelResource.ROOT);
     }
 
+    /** Records that {@code playerId} joined; the spawn is applied one player per tick. */
+    public static void onJoin(MinecraftServer server, UUID playerId) {
+        if (!multiplayer(server) || playerId == null) return;
+        SPAWNS.add(playerId);
+    }
+
     /**
-     * Makes the registry row for {@code playerId} when {@code autoAllocate} is on.
-     * The build is queued, never run here.
+     * Makes the registry row for {@code playerId} when {@code autoAllocate} is on. The build is
+     * queued, never run here. A player who already owns a plot is not allocated again, but a plot
+     * whose build never ran is queued so it is not lost for good.
      */
     public static boolean allocate(MinecraftServer server, UUID playerId) {
         if (!multiplayer(server) || playerId == null) return false;
-        if (!MpServerConfig.current().autoAllocate()) return false;
         PlotRegistry registry = registry();
         if (registry == null) return false;
-        var result = registry.allocateStored(worldRoot(server), StudioId.of(playerId), MpServerConfig.current().plotStride());
-        if (!result.created() || result.plot() == null) return false;
-        StudioRange.refresh(server);
-        if (MpServerConfig.current().autoBuild() && Anchors.forStudio(result.plot().owner()).isEmpty()) {
-            enqueueBuild(server, result.plot().index());
+        StudioId studio = StudioId.of(playerId);
+        Plot existing = registry.plotOf(studio).orElse(null);
+        if (existing != null) {
+            queueBuildIfUnbuilt(server, existing);
+            return false;
         }
+        if (!MpServerConfig.current().autoAllocate()) return false;
+        var result = registry.allocateStored(worldRoot(server), studio, MpServerConfig.current().plotStride());
+        if (!result.created() || result.plot() == null) return false;
+        JUST_ALLOCATED.add(playerId);
+        StudioRange.refresh(server);
+        queueBuildIfUnbuilt(server, result.plot());
         return true;
+    }
+
+    private static void queueBuildIfUnbuilt(MinecraftServer server, Plot plot) {
+        if (MpServerConfig.current().autoBuild() && Anchors.forStudio(plot.owner()).isEmpty()) {
+            enqueueBuild(server, plot.index());
+        }
     }
 
     public static void enqueueBuild(MinecraftServer server, int index) {
@@ -100,6 +121,7 @@ public final class PlotFeature {
     public static void resetPending() {
         BUILDS.clear();
         SPAWNS.clear();
+        JUST_ALLOCATED.clear();
     }
 
     /** Publishes {@code layout} for {@code studio} and stores that plot's anchors. Does not move the world spawn. */
@@ -117,7 +139,8 @@ public final class PlotFeature {
         return published;
     }
 
-    private static void onStarted(MinecraftServer server) {
+    /** Loads the registry, publishes the layouts that exist and queues the plots that were never built. */
+    public static void start(MinecraftServer server) {
         if (!multiplayer(server)) return;
         PlotStore.Loaded loaded = PlotStore.load(worldRoot(server));
         PlotRegistry registry = new PlotRegistry();
@@ -131,17 +154,24 @@ public final class PlotFeature {
             }
         }
         Plots.install(registry);
+        // A server that stopped between an allocation and its queued build leaves a plot without a
+        // layout. Resume those builds now, without allocating or logging an allocation again.
+        for (Plot plot : registry.all()) {
+            if (Anchors.forStudio(plot.owner()).isEmpty()) enqueueBuild(server, plot.index());
+        }
     }
 
     private static void onStopped(MinecraftServer server) {
         resetPending();
+        PlotRebuilds.clear();
         if (Plots.directory() instanceof PlotRegistry registry) {
             for (Plot plot : registry.all()) Anchors.remove(plot.owner());
         }
         Plots.install(Plots.SINGLEPLAYER);
     }
 
-    private static void onTick(MinecraftServer server) {
+    /** One queued build or one queued spawn per tick. */
+    public static void tick(MinecraftServer server) {
         if (!multiplayer(server)) {
             resetPending();
             return;
@@ -151,7 +181,9 @@ public final class PlotFeature {
             return;
         }
         if (SPAWNS.isEmpty()) return;
-        placeSpawn(server, SPAWNS.remove());
+        UUID playerId = SPAWNS.remove();
+        ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+        if (player != null) placeSpawn(server, player);
     }
 
     private static void buildOne(MinecraftServer server, int index) {
@@ -161,28 +193,40 @@ public final class PlotFeature {
         if (plot == null || !Anchors.forStudio(plot.owner()).isEmpty()) return;
         var builder = HqBuilders.get(HqBuilders.defaultId());
         if (builder == null) return;
+        UUID ownerId = plot.owner().owner();
+        // This attempt is over, whether it builds or throws: never teleport this player on a later join.
+        JUST_ALLOCATED.remove(ownerId);
         try {
             Anchors.Layout layout = HqFeature.buildPlot(server.overworld(), builder, false, plot.origin(), plot.owner());
-            ServerPlayer owner = server.getPlayerList().getPlayer(plot.owner().owner());
-            if (owner != null) PlotSpawn.applyRespawn(owner, layout);
+            ServerPlayer owner = server.getPlayerList().getPlayer(ownerId);
+            if (owner != null) {
+                PlotSpawn.applyRespawn(owner, layout);
+                // First build while the owner is online: move them in.
+                PlotSpawn.teleportHome(owner, layout);
+            }
         } catch (RuntimeException e) {
             AgentCraft.LOGGER.error("Plot {} failed to build", index, e);
         }
     }
 
-    private static void placeSpawn(MinecraftServer server, UUID playerId) {
+    /**
+     * Sets the owner's respawn point. Only a plot allocated by this join, or one whose first build
+     * is still to finish, teleports; a returning player with a layout stays where they logged out.
+     */
+    public static void placeSpawn(MinecraftServer server, ServerPlayer player) {
+        UUID playerId = player.getUUID();
         PlotRegistry registry = registry();
-        ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-        if (registry == null || player == null) return;
+        if (registry == null) return;
         Plot plot = registry.plotOf(StudioId.of(playerId)).orElse(null);
         if (plot == null) return;
         Anchors.Layout layout = Anchors.forStudio(plot.owner());
         if (layout.isEmpty()) {
             if (buildPending(plot.index())) SPAWNS.addFirst(playerId);
+            else JUST_ALLOCATED.remove(playerId);
             return;
         }
         PlotSpawn.applyRespawn(player, layout);
-        PlotSpawn.teleportHome(player, layout);
+        if (JUST_ALLOCATED.remove(playerId)) PlotSpawn.teleportHome(player, layout);
     }
 
     private static PlotRegistry registry() {

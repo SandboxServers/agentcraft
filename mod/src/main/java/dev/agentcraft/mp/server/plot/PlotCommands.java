@@ -3,6 +3,7 @@ package dev.agentcraft.mp.server.plot;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import dev.agentcraft.AgentCraft;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
@@ -14,6 +15,8 @@ import dev.agentcraft.mp.server.StudioRange;
 import java.lang.reflect.Field;
 import java.lang.reflect.InaccessibleObjectException;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
+import java.util.Collection;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Map;
@@ -49,6 +52,9 @@ public final class PlotCommands {
 
     public static void register(LiteralArgumentBuilder<CommandSourceStack> root) {
         root.then(Commands.literal("plot")
+            // Null-server sources are the packet builder's no-permission probe; the real filter already
+            // ran with the player's own source. Do not mark the node restricted there.
+            .requires(src -> src.getServer() == null || PlotFeature.multiplayer(src.getServer()))
             .then(Commands.literal(INFO).executes(ctx -> info(ctx.getSource())))
             .then(Commands.literal(HOME).executes(ctx -> home(ctx.getSource())))
             .then(Commands.literal(REBUILD)
@@ -109,10 +115,22 @@ public final class PlotCommands {
         }
         var builder = dev.agentcraft.hq.HqBuilders.get(dev.agentcraft.hq.HqBuilders.defaultId());
         if (builder == null) return refuse(source, REBUILD, plot.index(), plot.owner().owner(), "No HQ builder is registered.");
+        ServerPlayer actor = source.getPlayer();
+        if (!op(source) && actor != null) {
+            int now = source.getServer().getTickCount();
+            if (!PlotRebuilds.allowed(actor.getUUID(), now)) {
+                int seconds = PlotRebuilds.remainingSeconds(actor.getUUID(), now);
+                return refuse(source, REBUILD, plot.index(), plot.owner().owner(),
+                    "You can rebuild again in " + seconds + " seconds.");
+            }
+            PlotRebuilds.note(actor.getUUID(), now);
+        }
         Anchors.Layout layout;
         try {
-            layout = dev.agentcraft.hq.HqFeature.buildPlot(source.getLevel(), builder, force, plot.origin(), plot.owner());
+            // Plots always live in the overworld in multiplayer, wherever the caller stands.
+            layout = dev.agentcraft.hq.HqFeature.buildPlot(source.getServer().overworld(), builder, force, plot.origin(), plot.owner());
         } catch (RuntimeException e) {
+            AgentCraft.LOGGER.error("Plot {} failed to rebuild", plot.index(), e);
             return refuse(source, REBUILD, plot.index(), plot.owner().owner(), "Rebuild failed.");
         }
         ServerPlayer owner = source.getServer().getPlayerList().getPlayer(plot.owner().owner());
@@ -160,7 +178,7 @@ public final class PlotCommands {
                     case BAD_INDEX, OVERLAP, LOCAL -> "That plot index is not available.";
                     case IO -> "Could not save the plot.";
                 };
-            return refuse(source, ASSIGN, index, null, message);
+            return refuse(source, ASSIGN, index, target, message);
         }
         Anchors.remove(studio);
         PlotFeature.enqueueBuild(source.getServer(), result.plot().index());
@@ -178,7 +196,7 @@ public final class PlotCommands {
         Plot plot = registry.byIndex(index);
         if (plot == null) return refuse(source, FREE, index, null, "That plot does not exist.");
         UUID owner = plot.owner().owner();
-        if (!release(source.getServer(), registry, index)) return refuse(source, FREE, index, owner, "Could not free that plot.");
+        if (!release(PlotFeature.worldRoot(source.getServer()), registry, index)) return refuse(source, FREE, index, owner, "Could not free that plot.");
         StudioRange.refresh(source.getServer());
         log(source, FREE, index, true, owner);
         source.sendSuccess(() -> Component.literal("Freed plot " + index), true);
@@ -224,18 +242,44 @@ public final class PlotCommands {
         return Optional.empty();
     }
 
-    static boolean release(MinecraftServer server, PlotRegistry registry, int index) {
+    /** File operations of {@link #release}. A seam so a test can drive the rollback-save failure. */
+    interface ReleaseIo {
+        boolean save(Path root, Collection<Plot> plots);
+        boolean delete(Path root, int index);
+    }
+
+    private static final ReleaseIo REAL_IO = new ReleaseIo() {
+        @Override
+        public boolean save(Path root, Collection<Plot> plots) {
+            return PlotStore.save(root, plots);
+        }
+
+        @Override
+        public boolean delete(Path root, int index) {
+            return PlotStore.deletePlotDirectory(root, index);
+        }
+    };
+
+    static boolean release(Path root, PlotRegistry registry, int index) {
+        return release(root, registry, index, REAL_IO);
+    }
+
+    static boolean release(Path root, PlotRegistry registry, int index, ReleaseIo io) {
         Plot plot = registry.byIndex(index);
         if (plot == null || registry.frozen()) return false;
         registry.take(index);
-        var root = PlotFeature.worldRoot(server);
-        if (!PlotStore.save(root, registry.all())) {
+        if (!io.save(root, registry.all())) {
             registry.restore(plot);
             return false;
         }
-        if (!PlotStore.deletePlotDirectory(root, index)) {
+        if (!io.delete(root, index)) {
             registry.restore(plot);
-            PlotStore.save(root, registry.all());
+            if (!io.save(root, registry.all())) {
+                // Memory says the plot is owned, the file says it is free. Freeze so nothing else
+                // writes over the file and nothing is allocated until an operator looks.
+                registry.freeze();
+                AgentCraft.LOGGER.error("Could not rewrite the plot registry after failing to free plot {}", index);
+            }
             return false;
         }
         Anchors.remove(plot.owner());

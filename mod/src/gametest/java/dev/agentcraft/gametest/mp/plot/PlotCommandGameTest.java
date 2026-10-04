@@ -1,23 +1,37 @@
 package dev.agentcraft.gametest.mp.plot;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import dev.agentcraft.block.entity.StationBlockEntity;
 import dev.agentcraft.layout.Anchor;
 import dev.agentcraft.layout.AnchorNames;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.MpLog;
+import dev.agentcraft.mp.MpServerConfig;
+import dev.agentcraft.mp.Plot;
 import dev.agentcraft.mp.Plots;
 import dev.agentcraft.mp.StudioId;
 import dev.agentcraft.mp.server.plot.PlotCommands;
 import dev.agentcraft.mp.server.plot.PlotFeature;
+import dev.agentcraft.mp.server.plot.PlotRebuilds;
 import dev.agentcraft.mp.server.plot.PlotRegistry;
+import dev.agentcraft.mp.server.plot.PlotStore;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import net.fabricmc.fabric.api.gametest.v1.GameTest;
+import net.minecraft.commands.CommandSource;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.players.NameAndId;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 
 public final class PlotCommandGameTest {
     @GameTest
@@ -60,9 +74,14 @@ public final class PlotCommandGameTest {
             try (var capture = MpLog.capture()) {
                 helper.assertValueEqual(PlotCommands.info(sourceA), 1, "A's info is A's plot");
                 helper.assertValueEqual(PlotCommands.info(sourceB), 2, "B's info is B's plot");
-                String line = capture.lines().get(0);
-                helper.assertTrue(line.contains("command=info") && line.contains("ok=true"), "info telemetry");
-                helper.assertTrue(!line.contains("test-mock-player"), "info does not log the player name");
+                String expectedA = "event=plot_command player=" + a.getUUID() + " studio=" + a.getUUID()
+                    + " plot=0 command=info target_plot=0 ok=true";
+                String expectedB = "event=plot_command player=" + b.getUUID() + " studio=" + b.getUUID()
+                    + " plot=1 command=info target_plot=1 ok=true";
+                helper.assertTrue(capture.lines().contains(expectedA), "A's whole info line: " + capture.lines());
+                helper.assertTrue(capture.lines().contains(expectedB), "B's whole info line: " + capture.lines());
+                helper.assertTrue(capture.lines().stream().noneMatch(line -> line.contains("test-mock-player")),
+                    "info does not log the player name");
             }
             publishSpawn(StudioId.of(a.getUUID()), 10.5, 80, 10.5);
             publishSpawn(StudioId.of(b.getUUID()), 30.5, 80, 30.5);
@@ -100,8 +119,16 @@ public final class PlotCommandGameTest {
                 helper.assertTrue(registry.byIndex(0) != null, "the plot is still there");
                 helper.assertTrue(registry.plotOf(StudioId.of(other)).isEmpty(), "assign did not create a plot");
                 helper.assertValueEqual(Anchors.forStudio(studio).revision(), revision, "rebuild by index did not build");
-                helper.assertTrue(capture.lines().stream().anyMatch(line ->
-                    line.contains("command=assign") && line.contains("ok=false") && !line.contains("Other")), "assign refusal telemetry");
+                String ownerId = owner.getUUID().toString();
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + ownerId + " command=list target_plot=-1 ok=false"), "list refusal line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + ownerId + " plot=1 command=assign target_plot=1 ok=false"), "assign refusal line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + ownerId + " plot=0 command=free target_plot=0 ok=false"), "free refusal line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + ownerId + " plot=0 command=rebuild target_plot=0 ok=false"), "rebuild refusal line");
+                helper.assertTrue(capture.lines().stream().noneMatch(line -> line.contains("Other")), "the target name is not logged");
             }
             long local = Anchors.forStudio(StudioId.LOCAL).revision();
             helper.assertTrue(run(server.getCommands().getDispatcher(), "agentcraft hq", nonOp) == 0, "a non-op cannot run hq");
@@ -180,6 +207,8 @@ public final class PlotCommandGameTest {
             helper.assertTrue(((PlotRegistry) Plots.directory()).byIndex(0) != null, "the real plot survived");
             try (var capture = MpLog.capture()) {
                 helper.assertValueEqual(PlotCommands.free(console, 0), 1, "an operator can free");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command studio=" + owner + " plot=0 command=free target_plot=0 ok=true"), "the free line");
                 helper.assertTrue(Plots.directory().plotOf(StudioId.of(owner)).isEmpty(), "the row is gone");
                 helper.assertTrue(!java.nio.file.Files.exists(dir), "the plot directory is gone");
                 helper.assertTrue(java.nio.file.Files.exists(keep), "a sibling file stays");
@@ -218,6 +247,272 @@ public final class PlotCommandGameTest {
         } finally {
             PlotGameSupport.close(helper, session);
         }
+    }
+
+    @GameTest(maxTicks = 200)
+    public void nonOpRebuildIsThrottled(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer owner = PlotGameSupport.mock(helper);
+            helper.assertTrue(PlotFeature.allocate(server, owner.getUUID()), "the owner has plot 0");
+            StudioId studio = StudioId.of(owner.getUUID());
+            CommandSourceStack nonOp = PlotGameSupport.player(server, owner, false);
+            helper.assertValueEqual(PlotCommands.rebuild(nonOp, 0, false, false), 69, "first non-op rebuild");
+            long revision = Anchors.forStudio(studio).revision();
+            String refusal = "event=plot_command player=" + owner.getUUID() + " studio=" + owner.getUUID()
+                + " plot=0 command=rebuild target_plot=0 ok=false";
+            try (var capture = MpLog.capture()) {
+                helper.assertValueEqual(PlotCommands.rebuild(nonOp, 0, false, false), 0, "second rebuild inside the window");
+                helper.assertValueEqual(Anchors.forStudio(studio).revision(), revision, "the layout revision did not change");
+                helper.assertTrue(capture.lines().contains(refusal), "whole refusal line: " + capture.lines());
+            }
+            PlotRebuilds.note(owner.getUUID(), server.getTickCount() - PlotRebuilds.WINDOW_TICKS);
+            helper.assertValueEqual(PlotCommands.rebuild(nonOp, 0, false, false), 69, "rebuild allowed after 1200 ticks");
+            CommandSourceStack op = PlotGameSupport.player(server, owner, true);
+            helper.assertValueEqual(PlotCommands.rebuild(op, 0, false, false), 69, "first op rebuild");
+            helper.assertValueEqual(PlotCommands.rebuild(op, 0, false, false), 69, "an operator is not limited");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void assignRefusalCarriesTheResolvedTarget(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer op = PlotGameSupport.mock(helper);
+            CommandSourceStack source = PlotGameSupport.player(server, op, true);
+            UUID seated = UUID.randomUUID();
+            PlotRegistry registry = (PlotRegistry) Plots.directory();
+            registry.restore(new Plot(0, StudioId.of(seated), BlockPos.ZERO));
+            server.services().nameToIdCache().add(new NameAndId(seated, "RefusalTarget"));
+            try (var capture = MpLog.capture()) {
+                helper.assertValueEqual(PlotCommands.assign(source, "RefusalTarget", 1), 0, "assign refused");
+                String expected = "event=plot_command player=" + op.getUUID() + " studio=" + seated
+                    + " plot=1 command=assign target_plot=1 ok=false";
+                helper.assertTrue(capture.lines().contains(expected), "whole refusal line: " + capture.lines());
+                helper.assertTrue(!op.getUUID().equals(seated), "the actor and the target are different uuids");
+            }
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void plotNodeRequiresMultiplayer(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer player = PlotGameSupport.mock(helper);
+            CommandSourceStack source = PlotGameSupport.player(server, player, false);
+            var dispatcher = server.getCommands().getDispatcher();
+            var node = dispatcher.findNode(List.of("agentcraft", "plot"));
+            helper.assertTrue(node.canUse(source), "plot is usable with multiplayer on");
+            MpServerConfig previous = MpServerConfig.install(MpServerConfig.DEFAULT);
+            try (var capture = MpLog.capture()) {
+                helper.assertFalse(node.canUse(source), "plot is not usable with multiplayer off");
+                helper.assertValueEqual(run(dispatcher, "agentcraft plot info", source), 0, "the dispatcher refuses plot info");
+                helper.assertTrue(capture.lines().stream().noneMatch(line -> line.startsWith("event=plot_command")),
+                    "nothing plot_command is logged while off");
+            } finally {
+                MpServerConfig.install(previous);
+            }
+            helper.assertTrue(node.canUse(source), "plot is usable again");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void refusalsLeaveStateUnchanged(GameTestHelper helper) throws Exception {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer noPlot = PlotGameSupport.mock(helper);
+            ServerPlayer op = PlotGameSupport.mock(helper);
+            CommandSourceStack noPlotSource = PlotGameSupport.player(server, noPlot, false);
+            CommandSourceStack console = server.createCommandSourceStack().withSuppressedOutput();
+            List<String> failures = new ArrayList<>();
+            CommandSource recording = new CommandSource() {
+                @Override
+                public void sendSystemMessage(Component message) {
+                    failures.add(message.getString());
+                }
+
+                @Override
+                public boolean acceptsSuccess() {
+                    return false;
+                }
+
+                @Override
+                public boolean acceptsFailure() {
+                    return true;
+                }
+
+                @Override
+                public boolean shouldInformAdmins() {
+                    return false;
+                }
+            };
+            CommandSourceStack opRecording = server.createCommandSourceStack().withEntity(op)
+                .withPermission(net.minecraft.server.permissions.PermissionSet.ALL_PERMISSIONS).withSource(recording);
+            PlotRegistry registry = (PlotRegistry) Plots.directory();
+            StudioId studio = StudioId.of(noPlot.getUUID());
+            String player = noPlot.getUUID().toString();
+            String opId = op.getUUID().toString();
+            int size = registry.all().size();
+            long revision = Anchors.forStudio(studio).revision();
+            byte[] before = plotsFileBytes(server);
+            try (var capture = MpLog.capture()) {
+                helper.assertValueEqual(PlotCommands.info(noPlotSource), 0, "info without a plot");
+                assertStateUnchanged(helper, registry, studio, size, revision, before, server);
+
+                helper.assertValueEqual(PlotCommands.home(noPlotSource), 0, "home without a plot");
+                assertStateUnchanged(helper, registry, studio, size, revision, before, server);
+
+                helper.assertValueEqual(PlotCommands.rebuild(noPlotSource, 0, false, false), 0, "rebuild without a plot");
+                assertStateUnchanged(helper, registry, studio, size, revision, before, server);
+
+                helper.assertValueEqual(PlotCommands.info(console), 0, "console info");
+                assertStateUnchanged(helper, registry, studio, size, revision, before, server);
+
+                helper.assertValueEqual(PlotCommands.rebuild(console, 0, false, false), 0, "console rebuild");
+                assertStateUnchanged(helper, registry, studio, size, revision, before, server);
+
+                helper.assertValueEqual(PlotCommands.rebuild(opRecording, 7, true, false), 0, "a missing plot index");
+                assertStateUnchanged(helper, registry, studio, size, revision, before, server);
+
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + player + " command=info target_plot=-1 ok=false"), "no-plot info line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + player + " command=home target_plot=-1 ok=false"), "no-plot home line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + player + " command=rebuild target_plot=-1 ok=false"), "no-plot rebuild line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command command=info target_plot=-1 ok=false"), "console info line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command command=rebuild target_plot=-1 ok=false"), "console rebuild line");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + opId + " plot=7 command=rebuild target_plot=7 ok=false"), "missing-index line");
+            }
+            helper.assertTrue(failures.contains("That plot does not exist."), "the missing-index message: " + failures);
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    private static void assertStateUnchanged(GameTestHelper helper, PlotRegistry registry, StudioId studio,
+            int size, long revision, byte[] before, MinecraftServer server) throws Exception {
+        helper.assertValueEqual(registry.all().size(), size, "registry rows unchanged");
+        helper.assertValueEqual(Anchors.forStudio(studio).revision(), revision, "published revision unchanged");
+        helper.assertTrue(java.util.Arrays.equals(before, plotsFileBytes(server)), "plots.json unchanged");
+    }
+
+    @GameTest(maxTicks = 200)
+    public void opRebuildAndForceAndFreePublished(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        BlockPos lamp = new BlockPos(-15, 69, -10);
+        BlockState plannedLamp = null;
+        String plannedBinding = null;
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer owner = PlotGameSupport.mock(helper);
+            helper.assertTrue(PlotFeature.allocate(server, owner.getUUID()), "the owner has plot 0");
+            ServerPlayer op = PlotGameSupport.mock(helper);
+            CommandSourceStack opSource = PlotGameSupport.player(server, op, true);
+            StudioId studio = StudioId.of(owner.getUUID());
+            long opRevision = Anchors.forStudio(StudioId.of(op.getUUID())).revision();
+            helper.assertValueEqual(PlotCommands.rebuild(opSource, 0, true, true), 69, "an op rebuilds another owner's plot");
+            helper.assertValueEqual(Anchors.forStudio(studio).revision(), 1L, "the owner's layout advanced");
+            helper.assertValueEqual(Anchors.forStudio(StudioId.of(op.getUUID())).revision(), opRevision, "the op's own layout is untouched");
+
+            ServerLevel overworld = server.overworld();
+            plannedLamp = overworld.getBlockState(lamp);
+            if (overworld.getBlockEntity(lamp) instanceof StationBlockEntity station) plannedBinding = station.binding();
+            overworld.setBlock(lamp, Blocks.AIR.defaultBlockState(), 3);
+            CommandSourceStack ownerSource = PlotGameSupport.player(server, owner, false);
+            helper.assertValueEqual(PlotCommands.rebuild(ownerSource, 0, false, true), 69, "the owner force-rebuilds");
+            helper.assertValueEqual(overworld.getBlockState(lamp), plannedLamp, "force restored the changed cell");
+
+            publishSpawn(studio, 4.5, 70, 4.5);
+            helper.assertValueEqual(PlotCommands.free(opSource, 0), 1, "an op frees the plot");
+            helper.assertTrue(Anchors.forStudio(studio).isEmpty(), "the published layout is removed");
+            helper.succeed();
+        } finally {
+            // Restore the shared lamp from its known-good pre-damage state, independently of the rebuild
+            // under test, so a force regression does not contaminate later tests.
+            ServerLevel overworld = helper.getLevel().getServer().overworld();
+            if (plannedLamp != null) {
+                overworld.setBlock(lamp, plannedLamp, 3);
+                if (plannedBinding != null && overworld.getBlockEntity(lamp) instanceof StationBlockEntity station) {
+                    station.setBinding(plannedBinding);
+                }
+            }
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void assignAnOnlinePlayer(GameTestHelper helper) {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.NO_AUTO);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer online = PlotGameSupport.onlineMock(helper, session);
+            ServerPlayer op = PlotGameSupport.mock(helper);
+            CommandSourceStack opSource = PlotGameSupport.player(server, op, true);
+            helper.assertValueEqual(PlotCommands.assign(opSource, online.getGameProfile().name(), 3), 1, "assign an online player");
+            PlotRegistry registry = (PlotRegistry) Plots.directory();
+            helper.assertValueEqual(registry.byIndex(3).owner(), StudioId.of(online.getUUID()), "the online uuid is stored");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    @GameTest
+    public void frozenRegistryRefusesAssignAndFree(GameTestHelper helper) throws Exception {
+        var session = PlotGameSupport.open(helper, PlotGameSupport.ENABLED);
+        try {
+            MinecraftServer server = helper.getLevel().getServer();
+            ServerPlayer owner = PlotGameSupport.mock(helper);
+            helper.assertTrue(PlotFeature.allocate(server, owner.getUUID()), "the owner has plot 0");
+            ServerPlayer op = PlotGameSupport.mock(helper);
+            CommandSourceStack opSource = PlotGameSupport.player(server, op, true);
+            UUID target = UUID.randomUUID();
+            server.services().nameToIdCache().add(new NameAndId(target, "FrozenTarget"));
+            PlotRegistry registry = (PlotRegistry) Plots.directory();
+            registry.freeze();
+            int size = registry.all().size();
+            long revision = Anchors.forStudio(StudioId.of(owner.getUUID())).revision();
+            byte[] before = plotsFileBytes(server);
+            try (var capture = MpLog.capture()) {
+                helper.assertValueEqual(PlotCommands.assign(opSource, "FrozenTarget", 1), 0, "assign on a frozen registry");
+                helper.assertValueEqual(PlotCommands.free(opSource, 0), 0, "free on a frozen registry");
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + op.getUUID() + " studio=" + target
+                        + " plot=1 command=assign target_plot=1 ok=false"), "the frozen assign line: " + capture.lines());
+                helper.assertTrue(capture.lines().contains(
+                    "event=plot_command player=" + op.getUUID() + " studio=" + owner.getUUID()
+                        + " plot=0 command=free target_plot=0 ok=false"), "the frozen free line: " + capture.lines());
+            }
+            helper.assertValueEqual(registry.all().size(), size, "registry size unchanged");
+            helper.assertValueEqual(Anchors.forStudio(StudioId.of(owner.getUUID())).revision(), revision, "published revision unchanged");
+            helper.assertTrue(java.util.Arrays.equals(before, plotsFileBytes(server)), "plots.json unchanged");
+            helper.succeed();
+        } finally {
+            PlotGameSupport.close(helper, session);
+        }
+    }
+
+    private static byte[] plotsFileBytes(MinecraftServer server) throws Exception {
+        Path file = PlotStore.plotsFile(PlotFeature.worldRoot(server));
+        return Files.isRegularFile(file) ? Files.readAllBytes(file) : null;
     }
 
     private static void publishSpawn(StudioId studio, double x, double y, double z) {

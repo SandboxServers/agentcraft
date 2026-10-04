@@ -11,6 +11,7 @@ import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.Plot;
 import dev.agentcraft.mp.StudioId;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -85,10 +86,14 @@ public final class PlotStore {
             int skipped = 0;
             for (JsonElement element : plots.getAsJsonArray()) {
                 Plot plot = plotFrom(element);
-                if (plot == null || !indexes.add(plot.index()) || !owners.add(plot.owner().owner())) {
+                // Both sets are consulted before either is touched: a rejected row must not reserve
+                // its index or owner and reject the valid rows that follow it.
+                if (plot == null || indexes.contains(plot.index()) || owners.contains(plot.owner().owner())) {
                     skipped++;
                     continue;
                 }
+                indexes.add(plot.index());
+                owners.add(plot.owner().owner());
                 loaded.add(plot);
             }
             if (skipped > 0) AgentCraft.LOGGER.warn("Skipped {} invalid plot records", skipped);
@@ -140,7 +145,9 @@ public final class PlotStore {
                 Files.deleteIfExists(path);
             }
             return true;
-        } catch (IOException e) {
+        } catch (IOException | UncheckedIOException e) {
+            // Files.walk is lazy: an unreadable child directory surfaces here as an UncheckedIOException,
+            // which must count as a deletion failure so the caller rolls back instead of throwing past it.
             return false;
         }
     }
@@ -170,7 +177,10 @@ public final class PlotStore {
         OptionalInt z = integer(o.get("z"));
         if (index.isEmpty() || x.isEmpty() || y.isEmpty() || z.isEmpty()) return null;
         if (index.getAsInt() < 0 || y.getAsInt() != 0) return null;
-        if (Math.abs(x.getAsInt()) > 30_000_000 || Math.abs(z.getAsInt()) > 30_000_000) return null;
+        // Compare the signed values directly: Math.abs(Integer.MIN_VALUE) is negative, so it would
+        // pass an absolute-value bound check and then pass the % 16 test.
+        if (x.getAsInt() < -30_000_000 || x.getAsInt() > 30_000_000
+            || z.getAsInt() < -30_000_000 || z.getAsInt() > 30_000_000) return null;
         if (x.getAsInt() % 16 != 0 || z.getAsInt() % 16 != 0) return null;
         JsonElement owner = o.get("owner");
         if (owner == null || !owner.isJsonPrimitive() || !owner.getAsJsonPrimitive().isString()) return null;
