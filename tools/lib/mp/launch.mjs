@@ -11,10 +11,15 @@ export const exportScript = root => path.join(root, 'tools', 'lib', 'mp', 'expor
 export function gradleInvocation(root, output, command, platform = process.platform, marker) {
   const args = ['-I', exportScript(root), 'mpExportLaunch', `-PmpLaunchFile=${output}`,
     ...(marker ? [`-PmpRun=${marker}`] : []), '--no-configuration-cache', '--console=plain'];
-  if (command) return { command, args, cwd: path.join(root, 'mod') };
-  if (platform === 'win32') return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
-    `& .\\gradlew.bat ${args.map(psQuote).join(' ')}; exit $LASTEXITCODE`], cwd: path.join(root, 'mod') };
-  return { command: 'sh', args: ['./gradlew', ...args], cwd: path.join(root, 'mod') };
+  const cwd = path.join(root, 'mod');
+  // Node refuses to spawn a .bat or .cmd without a shell (EINVAL), so on Windows a custom one
+  // runs through PowerShell like the default wrapper. PowerShell needs .\ for a file in cwd.
+  if (command && !(platform === 'win32' && /\.(bat|cmd)$/i.test(command))) return { command, args, cwd };
+  if (platform !== 'win32') return { command: 'sh', args: ['./gradlew', ...args], cwd };
+  const batch = !command ? '.\\gradlew.bat'
+    : psQuote(!/[\\/]/.test(command) && fs.existsSync(path.join(cwd, command)) ? `.\\${command}` : command);
+  return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+    `& ${batch} ${args.map(psQuote).join(' ')}; exit $LASTEXITCODE`], cwd };
 }
 
 // Java argfiles avoid Windows command-length limits; always quote paths and literal backslashes.
@@ -49,7 +54,19 @@ export function javaEnvironment(env = process.env) {
   return { ...env };
 }
 
-export function seedGameDirs(plan) {
+// Only the game clients opt in to the DevBridge commands that act on a remote server, which
+// is how the harness drives them: never the server or a Foreman.
+export function gameSpec(plan, launch, java, env, client) {
+  if (!client) return { command: java, args: javaArguments(launch.server, plan.server.heap), cwd: plan.server.gameDir, log: plan.server.log, env };
+  return { command: java, args: javaArguments(launch.client, client.heap, client, plan.server.port), cwd: client.gameDir, log: client.log,
+    env: { ...env, AGENTCRAFT_PORT: String(client.foremanPort), AGENTCRAFT_DEV_PORT: String(client.devPort),
+      AGENTCRAFT_HOME: plan.home, AGENTCRAFT_PROFILE: client.profile, AGENTCRAFT_PLAYER: client.username,
+      AGENTCRAFT_DEV: '1', AGENTCRAFT_DEV_REMOTE: '1', AGENTCRAFT_FOREMAN: '1', AGENTCRAFT_AUTOWORLD: '0',
+      AGENTCRAFT_MUTE: '1', AGENTCRAFT_FOCUS: '0', AGENTCRAFT_NOTIFY: '0' } };
+}
+
+// rcon ({port, password}) opens the loopback RCON listener that a Windows `down` stops the server through.
+export function seedGameDirs(plan, rcon) {
   const dir = plan.server.gameDir;
   fs.mkdirSync(path.join(dir, 'config'), { recursive: true });
   // A local, offline test server only; bind to loopback to keep it off the LAN.
@@ -61,7 +78,9 @@ export function seedGameDirs(plan) {
     'server-ip=127.0.0.1', `server-port=${plan.server.port}`, 'online-mode=false', 'enforce-secure-profile=false',
     'level-name=mp-world', 'level-type=minecraft:flat', `generator-settings=${JSON.stringify(generator)}`,
     'gamemode=creative', 'difficulty=peaceful', 'spawn-protection=0', 'view-distance=6',
-    'simulation-distance=4', 'max-players=2', 'enable-rcon=false', 'enable-query=false', 'sync-chunk-writes=true', ''
+    'simulation-distance=4', 'max-players=2', ...(rcon ? ['enable-rcon=true', `rcon.port=${rcon.port}`,
+      `rcon.password=${rcon.password}`, 'broadcast-rcon-to-ops=false'] : ['enable-rcon=false']),
+    'enable-query=false', 'sync-chunk-writes=true', ''
   ].join('\n'));
   fs.writeFileSync(path.join(dir, 'config', 'agentcraft-server.json'), JSON.stringify({ enabled: true,
     plotStride: 128, autoAllocate: true, autoBuild: true, forceCreative: true, worldRules: true,
