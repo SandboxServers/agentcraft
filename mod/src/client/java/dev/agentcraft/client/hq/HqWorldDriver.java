@@ -79,6 +79,10 @@ public final class HqWorldDriver {
 	private static final int MARGIN = 3;
 	/** Reach of a station's signal bulbs around its anchor (blocks). */
 	private static final int SIGNAL_REACH = 3;
+	/** Most lamp keys in one intent; mirrors the wire cap on {@code lamps} in {@code PublicJson.intentFromJson}. */
+	static final int MAX_LAMPS = 64;
+	/** Most lit monitors in one intent; mirrors the wire cap on {@code litMonitors} in {@code PublicJson.intentFromJson}. */
+	static final int MAX_LIT_MONITORS = 64;
 
 	/** What the world should show, by binding. Immutable once built. */
 	record Wanted(Map<String, LampStatus> lamps, boolean podiumOpen, boolean mergeActive, Map<String, Boolean> monitorLit) {
@@ -299,22 +303,13 @@ public final class HqWorldDriver {
 	 * {@code layout} is part of the signature for future callers; lamp colours come only from
 	 * {@link ForemanState}. Only keys that pass {@link WorldIntent#isBinding} are emitted:
 	 * {@code ci:<repoId>} is never sent, and {@code ci:#} is capped at 8. An active agent whose id
-	 * the wire cannot carry is left out of {@code litMonitors} rather than throwing.
+	 * the wire cannot carry is left out of {@code litMonitors} rather than throwing. The intent never
+	 * exceeds {@link #MAX_LAMPS} or {@link #MAX_LIT_MONITORS}: agents past a cap are left out.
 	 */
 	public static WorldIntent compute(ForemanState st, Anchors.Layout layout) {
 		Map<String, LampStatusWire> lamps = new LinkedHashMap<>();
 		Set<String> lit = new HashSet<>();
 		Map<String, String> waitingOn = awaiting(st);
-		for (Agent a : st.agents().values()) {
-			String aid = a.id();
-			String binding = "agent:" + aid;
-			if (WorldIntent.isBinding(binding)) {
-				lamps.put(binding, agentWire(a, waitingOn.containsKey(aid)));
-			}
-			if (a.isActive() && isSafeAgentId(aid)) {
-				lit.add(aid);
-			}
-		}
 		int n = 0;
 		for (Repo r : st.repos().values()) {
 			if (++n > 8) {
@@ -333,6 +328,21 @@ public final class HqWorldDriver {
 		lamps.put("merge", merge ? LampStatusWire.WAITING : LampStatusWire.OFF);
 		LampStatusWire beacon = LampStatusWire.valueOf(beaconLamp(st, open, goalLampStatus).name());
 		lamps.put(BEACON_BINDING, beacon);
+		// Agents go last, in the Foreman's order: the CI lamps and the fixed keys above are always
+		// present and the caps cut only the tail. The two caps are independent: an agent past the
+		// lamp cap has no lamp entry, which the applier treats as "agent not present" (its lamp goes
+		// dark); an agent past the monitor cap has no monitor entry (its monitor is unlit). The fixed
+		// keys take lamp places, so the lamp cap is reached a few agents before the monitor cap.
+		for (Agent a : st.agents().values()) {
+			String aid = a.id();
+			String binding = "agent:" + aid;
+			if (lamps.size() < MAX_LAMPS && WorldIntent.isBinding(binding)) {
+				lamps.put(binding, agentWire(a, waitingOn.containsKey(aid)));
+			}
+			if (lit.size() < MAX_LIT_MONITORS && a.isActive() && isSafeAgentId(aid)) {
+				lit.add(aid);
+			}
+		}
 		int rev;
 		try {
 			rev = Math.toIntExact(st.revision());
