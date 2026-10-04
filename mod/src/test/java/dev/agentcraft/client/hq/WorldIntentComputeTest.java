@@ -19,9 +19,11 @@ import java.util.Set;
 import org.junit.jupiter.api.*;
 
 /**
- * Golden tests for the pure {@link HqWorldDriver#compute(ForemanState, Anchors.Layout)}: the new
- * {@link WorldIntent} must equal the pre-MP-07 driver's visible state (see
- * {@link HqWorldDriverReference}) with the {@code ci:<repoId>} keys removed, for both fixtures.
+ * Golden tests for the driver's two pure computations, for both fixtures: the full
+ * {@link HqWorldDriver#compute(ForemanState)} (what singleplayer applies) must equal the pre-MP-07
+ * driver's state (see {@link HqWorldDriverReference}), and the wire
+ * {@link HqWorldDriver#compute(ForemanState, Anchors.Layout)} must equal that state with the
+ * {@code ci:<repoId>} keys removed.
  */
 class WorldIntentComputeTest {
 	private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
@@ -36,6 +38,16 @@ class WorldIntentComputeTest {
 	void computeMatchesReference_showcaseLate() {
 		ForemanState st = ForemanStates.showcaseLate();
 		assertMatchesReference(st, "sim-demo-fixture-late");
+	}
+
+	@Test
+	void fullWantedEqualsReference_showcase() {
+		assertFullEqualsReference(ForemanStates.showcase(), "sim-demo-fixture-busy");
+	}
+
+	@Test
+	void fullWantedEqualsReference_showcaseLate() {
+		assertFullEqualsReference(ForemanStates.showcaseLate(), "sim-demo-fixture-late");
 	}
 
 	@Test
@@ -115,6 +127,28 @@ class WorldIntentComputeTest {
 	}
 
 	@Test
+	void wireFilterKeepsOnlyWhatTheWireCarries() {
+		String longId = "0123456789abcdefg"; // 17 chars
+		Map<String, LampStatus> lamps = new LinkedHashMap<>();
+		lamps.put("goal", LampStatus.WORKING);
+		lamps.put("ci:#8", LampStatus.DONE);
+		lamps.put("ci:#9", LampStatus.DONE);
+		lamps.put("ci:my-repo", LampStatus.ERROR);
+		lamps.put("lobby", LampStatus.IDLE);
+		lamps.put("agent:kit", LampStatus.THINKING);
+		lamps.put("agent:" + longId, LampStatus.IDLE);
+		HqWorldDriver.Wanted full = new HqWorldDriver.Wanted(lamps, true, false, Map.of("kit", true, "wren", false, longId, true));
+
+		WorldIntent intent = assertDoesNotThrow(() -> HqWorldDriver.wireIntent(full, List.of("kit", "wren", longId), 1L << 40));
+		assertEquals(Map.of("goal", LampStatusWire.WORKING, "ci:#8", LampStatusWire.DONE, "agent:kit", LampStatusWire.THINKING),
+			intent.lamps(), "only legal bindings pass: no ci:<repoId>, no ci:#9, no 17-char agent");
+		assertEquals(Set.of("kit"), intent.litMonitors(), "only lit monitors with a wire-legal id pass");
+		assertTrue(intent.podiumOpen(), "the podium flag is copied");
+		assertFalse(intent.mergeActive(), "the merge flag is copied");
+		assertEquals(Integer.MAX_VALUE, intent.rev(), "a revision past int is clamped, not thrown");
+	}
+
+	@Test
 	void roundTripsThroughPublicJson() {
 		WorldIntent i = HqWorldDriver.compute(ForemanStates.showcase(), Anchors.Layout.EMPTY);
 		WorldIntent back = PublicJson.intentFromJson(PublicJson.toJson(i));
@@ -126,6 +160,17 @@ class WorldIntentComputeTest {
 	}
 
 	// ------------------------------------------------------------------ helpers
+
+	/** The full (singleplayer) state is the pre-MP-07 driver's, {@code ci:<repoId>} included. */
+	private static void assertFullEqualsReference(ForemanState st, String repoId) {
+		HqWorldDriverReference.Reference ref = HqWorldDriverReference.compute(st);
+		HqWorldDriver.Wanted full = HqWorldDriver.compute(st);
+		assertEquals(new HqWorldDriver.Wanted(ref.lamps(), ref.podiumOpen(), ref.mergeActive(), ref.monitorLit()), full,
+			"the full Wanted differs from the reference");
+		assertEquals(LampStatus.forCi(st.repo(repoId).ci().wire()), full.lamps().get("ci:" + repoId),
+			"the documented ci:<repoId> binding carries the repo's CI status");
+		assertEquals(st.agents().keySet(), full.monitorLit().keySet(), "one monitor entry per agent, lit or not");
+	}
 
 	private static void assertMatchesReference(ForemanState st, String repoId) {
 		WorldIntent intent = HqWorldDriver.compute(st, Anchors.Layout.EMPTY);

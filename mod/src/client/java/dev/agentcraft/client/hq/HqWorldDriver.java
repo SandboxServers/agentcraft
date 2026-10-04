@@ -55,8 +55,8 @@ import org.jspecify.annotations.Nullable;
  * <ul>
  *   <li>status lamps by binding: {@code agent:<id>} (the agent's status family, the same one its
  *       nameplate shows: an idle/done agent with a decision waiting on you is {@code waiting}; off
- *       when the agent is off shift or gone), {@code ci:#<n>} (the n-th repo in Foreman order),
- *       {@code goal} / {@code goal:atrium} (the current goal), {@code decisions}
+ *       when the agent is off shift or gone), {@code ci:<repoId>} or {@code ci:#<n>} (the n-th repo
+ *       in Foreman order), {@code goal} / {@code goal:atrium} (the current goal), {@code decisions}
  *       (waiting while any decision is open), {@code merge} (waiting while a merge decision is open);</li>
  *   <li>the decision podium {@code open} while any decision is open;</li>
  *   <li>merge stations {@code active} while a merge decision is open;</li>
@@ -69,8 +69,10 @@ import org.jspecify.annotations.Nullable;
  * Foreman link is down the blocks keep their last state (the view is stale, not wrong).
  *
  * <p>Singleplayer dispatches the world writes to the integrated server thread through
- * {@link ServerTasks}; multiplayer sends a {@link WorldIntentC2S} snapshot instead. The decision
- * logic lives in {@link #tick(ForemanState, Anchors.Layout, boolean, ServerInfo, Pacer, Applier)},
+ * {@link ServerTasks}, with the full state of {@link #compute(ForemanState)}; multiplayer sends a
+ * {@link WorldIntentC2S} snapshot instead, which carries only what {@link #wireIntent} lets
+ * through (no {@code ci:<repoId>}, eight CI slots, wire-legal agent ids, 64 lamps and 64 lit
+ * monitors). The decision logic lives in {@link #tick(ForemanState, Anchors.Layout, boolean, ServerInfo, Pacer, Applier)},
  * which takes every dependency as an argument so tests need no client, network or world.
  */
 public final class HqWorldDriver {
@@ -98,7 +100,11 @@ public final class HqWorldDriver {
 	 *  {@code null} = none, {@code true} = force open, {@code false} = force closed. */
 	private static @Nullable Boolean podiumOverride;
 	private static @Nullable Boolean lastOverride;
+	/** The full state handed to the {@link Applier} last. */
+	private static @Nullable Wanted lastFull;
+	/** The filtered state offered to the pacer last (computed on every recompute, sent or not). */
 	private static @Nullable WorldIntent lastIntent;
+	/** What {@link #wanted()} reports. */
 	private static @Nullable Wanted lastWanted;
 	private static long lastRevision = -1;
 	private static long lastLayout = -1;
@@ -115,7 +121,11 @@ public final class HqWorldDriver {
 		return lastChanged;
 	}
 
-	/** The last applied wanted state, for {@link HqClientFeature} and {@code dev.state.hq}. */
+	/**
+	 * What the world shows as of the last recompute, for {@link HqClientFeature} and
+	 * {@code dev.state.hq}: the full state while nothing is sent (singleplayer applies all of it),
+	 * and the filtered state while the driver sends to a server (what that server will show).
+	 */
 	public static @Nullable Wanted wanted() {
 		return lastWanted;
 	}
@@ -135,6 +145,7 @@ public final class HqWorldDriver {
 	static void resetForTest() {
 		podiumOverride = null;
 		lastOverride = null;
+		lastFull = null;
 		lastIntent = null;
 		lastWanted = null;
 		lastRevision = -1;
@@ -181,25 +192,31 @@ public final class HqWorldDriver {
 			}
 			return;
 		}
-		WorldIntent intent = applyPodiumOverride(compute(st, layout));
+		Wanted computed = compute(st);
+		// The override is folded into the intent, and the full state takes the same podium value, so
+		// the local world and the server agree on it on this tick.
+		WorldIntent intent = applyPodiumOverride(wireIntent(computed, st.agents().keySet(), st.revision()));
+		Wanted full = intent.podiumOpen() == computed.podiumOpen() ? computed
+			: new Wanted(computed.lamps(), intent.podiumOpen(), computed.mergeActive(), computed.monitorLit());
 		lastRevision = st.revision();
 		lastLayout = layout.revision();
 		lastOverride = podiumOverride;
-		boolean contentDiffers = lastIntent == null || !contentEqual(intent, lastIntent);
+		// The two are compared separately: a change the wire does not carry (a ci:<repoId> lamp, an
+		// agent past a cap) is world work here and no news for the server.
+		boolean fullDiffers = !full.equals(lastFull);
+		boolean intentDiffers = lastIntent == null || !contentEqual(intent, lastIntent);
+		lastFull = full;
 		lastIntent = intent;
-		Wanted w = intentToWanted(intent);
-		if (contentDiffers) {
-			lastWanted = w;
-		}
-		if (contentDiffers || resync) {
-			applier.apply(w, layout.bounds(),
+		lastWanted = canSend ? intentToWanted(intent) : full;
+		if (fullDiffers || resync) {
+			applier.apply(full, layout.bounds(),
 				signalCenters(layout, AnchorNames.DECISION_PODIUM),
 				signalCenters(layout, AnchorNames.MERGESTATION));
 		}
 		if (canSend && info != null) {
 			// Replace the pending snapshot with this tick's before spending a send slot, so a free
 			// slot always carries the newest state (not an older queued one).
-			if (contentDiffers || resync) {
+			if (intentDiffers || resync) {
 				pacer.offer(intent);
 			}
 			pacer.flush(info.intentsPerSecond());
@@ -230,6 +247,7 @@ public final class HqWorldDriver {
 			&& a.litMonitors().equals(b.litMonitors());
 	}
 
+	/** The state a server shows for {@code intent} (only lit monitors have an entry). */
 	private static Wanted intentToWanted(WorldIntent intent) {
 		Map<String, LampStatus> lamps = new LinkedHashMap<>(intent.lamps().size() + intent.litMonitors().size());
 		intent.lamps().forEach((k, v) -> {
@@ -299,57 +317,85 @@ public final class HqWorldDriver {
 	// ------------------------------------------------------------------ compute
 
 	/**
-	 * A pure snapshot of what the world should show, from the Foreman state alone.
-	 * {@code layout} is part of the signature for future callers; lamp colours come only from
-	 * {@link ForemanState}. Only keys that pass {@link WorldIntent#isBinding} are emitted:
-	 * {@code ci:<repoId>} is never sent, and {@code ci:#} is capped at 8. An active agent whose id
-	 * the wire cannot carry is left out of {@code litMonitors} rather than throwing. The intent never
-	 * exceeds {@link #MAX_LAMPS} or {@link #MAX_LIT_MONITORS}: agents past a cap are left out.
+	 * The full state the world should show, from the Foreman state alone: every agent, every repo
+	 * (as {@code ci:<repoId>} and as {@code ci:#<n>}), nothing capped. This is what singleplayer
+	 * applies; the wire carries only {@link #wireIntent a filtered part} of it.
 	 */
-	public static WorldIntent compute(ForemanState st, Anchors.Layout layout) {
-		Map<String, LampStatusWire> lamps = new LinkedHashMap<>();
-		Set<String> lit = new HashSet<>();
+	static Wanted compute(ForemanState st) {
+		Map<String, LampStatus> lamps = new HashMap<>();
+		Map<String, Boolean> lit = new HashMap<>();
 		Map<String, String> waitingOn = awaiting(st);
+		for (Agent a : st.agents().values()) {
+			lamps.put("agent:" + a.id(), agentLamp(a, waitingOn.containsKey(a.id())));
+			lit.put(a.id(), a.isActive());
+		}
 		int n = 0;
 		for (Repo r : st.repos().values()) {
-			if (++n > 8) {
-				break; // the record constructor refuses ci:#9
-			}
-			LampStatusWire ci = LampStatusWire.valueOf(LampStatus.forCi(r.ci().wire()).name());
-			lamps.put("ci:#" + n, ci);
+			LampStatus ci = LampStatus.forCi(r.ci().wire());
+			lamps.put("ci:" + r.id(), ci);
+			lamps.put("ci:#" + (++n), ci);
 		}
-		LampStatus goalLampStatus = goalLamp(st.goal());
-		LampStatusWire goal = LampStatusWire.valueOf(goalLampStatus.name());
+		LampStatus goal = goalLamp(st.goal());
 		lamps.put("goal", goal);
 		lamps.put("goal:atrium", goal);
 		boolean open = !st.openDecisions().isEmpty();
-		lamps.put("decisions", open ? LampStatusWire.WAITING : LampStatusWire.OFF);
+		lamps.put("decisions", open ? LampStatus.WAITING : LampStatus.OFF);
 		boolean merge = st.oldestOpen(DecisionKind.MERGE) != null;
-		lamps.put("merge", merge ? LampStatusWire.WAITING : LampStatusWire.OFF);
-		LampStatusWire beacon = LampStatusWire.valueOf(beaconLamp(st, open, goalLampStatus).name());
-		lamps.put(BEACON_BINDING, beacon);
-		// Agents go last, in the Foreman's order: the CI lamps and the fixed keys above are always
-		// present and the caps cut only the tail. The two caps are independent: an agent past the
-		// lamp cap has no lamp entry, which the applier treats as "agent not present" (its lamp goes
-		// dark); an agent past the monitor cap has no monitor entry (its monitor is unlit). The fixed
-		// keys take lamp places, so the lamp cap is reached a few agents before the monitor cap.
-		for (Agent a : st.agents().values()) {
-			String aid = a.id();
-			String binding = "agent:" + aid;
-			if (lamps.size() < MAX_LAMPS && WorldIntent.isBinding(binding)) {
-				lamps.put(binding, agentWire(a, waitingOn.containsKey(aid)));
+		lamps.put("merge", merge ? LampStatus.WAITING : LampStatus.OFF);
+		lamps.put(BEACON_BINDING, beaconLamp(st, open, goal));
+		return new Wanted(Map.copyOf(lamps), open, merge, Map.copyOf(lit));
+	}
+
+	/**
+	 * The wire snapshot of the Foreman state: {@link #compute(ForemanState)} through
+	 * {@link #wireIntent}. {@code layout} is part of the signature for future callers; lamp colours
+	 * come only from {@link ForemanState}.
+	 */
+	public static WorldIntent compute(ForemanState st, Anchors.Layout layout) {
+		return wireIntent(compute(st), st.agents().keySet(), st.revision());
+	}
+
+	/**
+	 * The part of {@code full} that is sent to a server. Pure, and never throws. Only keys that pass
+	 * {@link WorldIntent#isBinding} are kept: {@code ci:<repoId>} is never sent (a repo id is not
+	 * public), {@code ci:#} stops at 8, and an agent whose id the wire cannot carry has neither a
+	 * lamp nor a lit monitor. The intent never exceeds {@link #MAX_LAMPS} or
+	 * {@link #MAX_LIT_MONITORS}: the fixed and CI keys always go in, then the agents in
+	 * {@code agentOrder} (the Foreman's order) until a cap is reached.
+	 */
+	static WorldIntent wireIntent(Wanted full, Iterable<String> agentOrder, long revision) {
+		Map<String, LampStatusWire> lamps = new LinkedHashMap<>();
+		Set<String> lit = new HashSet<>();
+		// The fixed keys and ci:#1..8: at most 13, so they never meet the cap.
+		full.lamps().forEach((key, status) -> {
+			if (status != null && WorldIntent.isBinding(key) && !key.startsWith("agent:")) {
+				lamps.put(key, wire(status));
 			}
-			if (lit.size() < MAX_LIT_MONITORS && a.isActive() && isSafeAgentId(aid)) {
-				lit.add(aid);
+		});
+		// Agents go last, so the caps cut only the tail. The two caps are independent: an agent past
+		// the lamp cap has no lamp entry, which the server treats as "agent not present" (its lamp
+		// goes dark); an agent past the monitor cap has no monitor entry (its monitor is unlit). The
+		// fixed keys take lamp places, so the lamp cap is reached a few agents before the monitor cap.
+		for (String id : agentOrder) {
+			if (id == null) {
+				continue;
+			}
+			String binding = "agent:" + id;
+			LampStatus lamp = full.lamps().get(binding);
+			if (lamp != null && lamps.size() < MAX_LAMPS && WorldIntent.isBinding(binding)) {
+				lamps.put(binding, wire(lamp));
+			}
+			if (lit.size() < MAX_LIT_MONITORS && Boolean.TRUE.equals(full.monitorLit().get(id)) && isSafeAgentId(id)) {
+				lit.add(id);
 			}
 		}
 		int rev;
 		try {
-			rev = Math.toIntExact(st.revision());
+			rev = Math.toIntExact(revision);
 		} catch (ArithmeticException e) {
 			rev = Integer.MAX_VALUE;
 		}
-		return new WorldIntent(rev, Map.copyOf(lamps), open, merge, Set.copyOf(lit));
+		return new WorldIntent(rev, Map.copyOf(lamps), full.podiumOpen(), full.mergeActive(), Set.copyOf(lit));
 	}
 
 	/** An agent id safe to put in {@code litMonitors} (passes the record's constructor guard). */
@@ -357,8 +403,8 @@ public final class HqWorldDriver {
 		return id != null && !id.isEmpty() && id.length() <= 16 && id.equals(MpText.sanitize(id, 16));
 	}
 
-	private static LampStatusWire agentWire(Agent a, boolean awaitingUser) {
-		return LampStatusWire.valueOf(agentLamp(a, awaitingUser).name());
+	private static LampStatusWire wire(LampStatus status) {
+		return LampStatusWire.valueOf(status.name());
 	}
 
 	/** The cupola beacon's binding (the whole studio at a glance, seen from outside). */
