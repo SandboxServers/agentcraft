@@ -1,0 +1,82 @@
+name: ci
+
+# Pull-request checks: Foreman (typecheck, tests, protocol doc freshness) on the minimum and
+# current Node, the tools tests, and the mod build plus Fabric game tests when the game-test
+# source set exists (MP-T). Builds and tests only: nothing is published or pushed.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  foreman:
+    name: foreman (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.18', '24']
+    defaults:
+      run:
+        working-directory: foreman
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: foreman/package-lock.json
+      # The sim backend and repos tests make real commits in temp repos.
+      - run: |
+          git config --global user.name "agentcraft-ci"
+          git config --global user.email "ci@agentcraft.invalid"
+      - run: npm ci
+      - run: npm run check
+
+  tools:
+    name: tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.18'
+          cache: npm
+          cache-dependency-path: tools/package-lock.json
+      - run: npm ci --prefix tools
+      - run: npm test --prefix tools
+
+  mod:
+    name: mod (build + game tests)
+    runs-on: ubuntu-latest
+    # Cold: Gradle downloads Minecraft and Fabric (~600 MB).
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: mod
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - run: chmod +x gradlew
+      - run: ./gradlew build --stacktrace
+      - name: game tests
+        if: hashFiles('mod/src/gametest/**') != ''
+        run: ./gradlew runGameTest --stacktrace
