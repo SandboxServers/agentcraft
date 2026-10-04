@@ -35,8 +35,8 @@ public final class MpDevFake {
                 String owner=MpText.sanitize(f.optStr("owner","Bob"),16);
                 boolean overlay=f.optBool("overlay",true);
                 StudioView own=Studios.own();
-                Studios.put(new StudioView(FAKE,false,owner,true,own.layout(),state,0));
                 Studios.setOverlay(overlay?FAKE:null);
+                Studios.put(new StudioView(FAKE,false,owner,true,own.layout(),state,0));
                 MpLog.event(MpEvents.FAKE_STUDIO,"studio",FAKE.owner(),"action","set","agents",state.agents().size(),"rev",state.rev());
             }
         } catch(IllegalArgumentException e) { throw new DevBridge.DevException("invalid public studio fixture: "+e.getMessage()); }

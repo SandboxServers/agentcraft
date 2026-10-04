@@ -32,7 +32,7 @@ import org.jspecify.annotations.Nullable;
  * it is saved as {@code agentcraft-anchors.json} in the world folder and loaded again whenever the HQ
  * world starts, so the layout survives restarts without rebuilding. Readers on any thread get an
  * immutable snapshot ({@link #current()}); the client (same JVM in singleplayer) reads it directly.
- * Listeners are told about every new layout (on the thread that published it).
+ * Listeners run on the mutating thread (publish, remove or identity change).
  */
 public final class Anchors {
 	public static final String FILE = "agentcraft-anchors.json";
@@ -45,7 +45,7 @@ public final class Anchors {
 		}
 	}
 
-	/** An immutable published layout. {@code revision} increases with every publish (also across loads). */
+	/** An immutable snapshot. Server builds increment revision; snapshot publishes preserve it. */
 	public record Layout(String name, long revision, @Nullable Bounds bounds, Map<String, Anchor> anchors) {
 		public Layout { anchors = Collections.unmodifiableMap(new LinkedHashMap<>(anchors)); }
 
@@ -107,7 +107,9 @@ public final class Anchors {
 	public static StudioId self() { return self; }
 
 	public static void setSelf(StudioId id) {
-		self = java.util.Objects.requireNonNull(id);
+		java.util.Objects.requireNonNull(id);
+		if (self.equals(id)) return;
+		self = id;
 		notifyLocal(current());
 	}
 
@@ -117,7 +119,8 @@ public final class Anchors {
 
 	public static void addStudioListener(BiConsumer<StudioId, Layout> listener) { STUDIO_LISTENERS.add(listener); }
 
-	/** Install an immutable snapshot. Disk persistence outside LOCAL belongs to the plot registry. */
+	/** Install a snapshot, preserving its revision. Builders must supply an advancing revision;
+	 * network consumers preserve the server revision. Disk persistence outside LOCAL belongs to MP-03. */
 	public static void publish(StudioId id, Layout layout) {
 		synchronized (Anchors.class) {
 			Map<StudioId, Layout> next = new LinkedHashMap<>(layouts);
@@ -127,6 +130,7 @@ public final class Anchors {
 		notifyStudio(id, layout);
 	}
 
+	/** Install a self snapshot with the caller-supplied revision, as in publish(StudioId, Layout). */
 	public static void publish(Layout layout) { publish(self(), layout); }
 
 	public static void remove(StudioId id) {

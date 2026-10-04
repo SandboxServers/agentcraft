@@ -32,9 +32,9 @@ final class MpCodecs {
     }
     static ServerInfo info(RegistryFriendlyByteBuf b) {
         int stride=integer(b,96,1048576); if(stride%16!=0) throw new IllegalArgumentException("unaligned stride");
-        return new ServerInfo(stride,integer(b,0,1024));
+        return new ServerInfo(stride,integer(b,0,1024),integer(b,1,1000),integer(b,1,1000));
     }
-    static void info(RegistryFriendlyByteBuf b,ServerInfo info) { b.writeVarInt(info.plotStride()); b.writeVarInt(info.relayRadiusChunks()); }
+    static void info(RegistryFriendlyByteBuf b,ServerInfo info) { b.writeVarInt(info.plotStride()); b.writeVarInt(info.relayRadiusChunks()); b.writeVarInt(info.publicStatePerSecond()); b.writeVarInt(info.intentsPerSecond()); }
     static double coordinate(RegistryFriendlyByteBuf b) {
         double n=b.readDouble(); if(!Double.isFinite(n) || Math.abs(n)>30000000) throw new IllegalArgumentException("invalid coordinate"); return n;
     }
@@ -61,8 +61,12 @@ final class MpCodecs {
         if(l.bounds()!=null) { Bounds v=l.bounds(); b.writeInt(v.minX()); b.writeInt(v.minY()); b.writeInt(v.minZ()); b.writeInt(v.maxX()); b.writeInt(v.maxY()); b.writeInt(v.maxZ()); }
         b.writeVarInt(l.anchors().size()); l.anchors().forEach((key,a)-> { b.writeUtf(key); b.writeDouble(a.x()); b.writeDouble(a.y()); b.writeDouble(a.z()); b.writeFloat(a.yaw()); b.writeFloat(a.pitch()); });
     }
-    static PublicStudioState state(RegistryFriendlyByteBuf b) { return PublicJson.fromJson(b.readUtf(30000)); }
-    static void state(RegistryFriendlyByteBuf b,PublicStudioState s) { b.writeUtf(PublicJson.toJson(s).toString(),30000); }
+    static PublicStudioState state(RegistryFriendlyByteBuf b) {
+        PublicStudioState state=PublicJson.fromJson(b.readUtf(30000));
+        if(PublicJson.toJson(state).toString().length()>30000) throw new IllegalArgumentException("JSON cap exceeded");
+        return state;
+    }
+    static void state(RegistryFriendlyByteBuf b,PublicStudioState s) { b.writeUtf(PublicJson.toJson(PublicJson.fromJson(PublicJson.toJson(s))).toString(),30000); }
     static PublicEvent event(RegistryFriendlyByteBuf b) { return PublicJson.eventFromJson(b.readUtf(2048)); }
     static void event(RegistryFriendlyByteBuf b,PublicEvent e) { b.writeUtf(PublicJson.toJson(e).toString(),2048); }
     static WorldIntent intent(RegistryFriendlyByteBuf b) { return PublicJson.intentFromJson(b.readUtf(16384)); }

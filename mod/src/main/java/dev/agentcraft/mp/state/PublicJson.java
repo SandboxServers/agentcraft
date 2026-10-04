@@ -60,15 +60,48 @@ public final class PublicJson {
         shape(o,"rev lamps podiumOpen mergeActive litMonitors");
         JsonObject lamps=obj(o,"lamps"); if(lamps.size()>64) throw new IllegalArgumentException("binding cap exceeded");
         Map<String,LampStatusWire> map=new LinkedHashMap<>();
-        lamps.entrySet().forEach(e->{ String key=MpText.sanitize(e.getKey(),48); if(map.put(key,en(e.getValue(),LampStatusWire.class))!=null) throw new IllegalArgumentException("duplicate binding"); });
-        List<String> lit=list(o,"litMonitors",64,e->string(e,16)); Set<String> set=new LinkedHashSet<>(lit);
+        lamps.entrySet().forEach(e->{ String key=e.getKey(); if(!WorldIntent.isBinding(key)) throw new IllegalArgumentException("invalid binding"); if(map.put(key,en(e.getValue(),LampStatusWire.class))!=null) throw new IllegalArgumentException("duplicate binding"); });
+        List<String> lit=list(o,"litMonitors",64,e->{
+            String id=string(e,16);
+            if(!id.equals(e.getAsString()) || id.isEmpty()) throw new IllegalArgumentException("invalid monitor");
+            return id;
+        }); Set<String> set=new LinkedHashSet<>(lit);
         if(set.size()!=lit.size()) throw new IllegalArgumentException("duplicate monitor");
         return new WorldIntent(num(o,"rev",0,Integer.MAX_VALUE),map,bool(o,"podiumOpen"),bool(o,"mergeActive"),set);
     }
     public static WorldIntent intentFromJson(String s) { return intentFromJson(parse(s,16384)); }
     private static JsonObject parse(String s,int cap) {
         if(s.length()>cap) throw new IllegalArgumentException("JSON cap exceeded");
-        return object(JsonParser.parseString(s));
+        try(var reader=new com.google.gson.stream.JsonReader(new java.io.StringReader(s))) {
+            reader.setStrictness(Strictness.STRICT);
+            JsonElement value=read(reader,0);
+            if(reader.peek()!=com.google.gson.stream.JsonToken.END_DOCUMENT) throw new IllegalArgumentException("trailing JSON");
+            return object(value);
+        } catch(java.io.IOException | JsonParseException e) { throw new IllegalArgumentException("invalid JSON"); }
+    }
+    private static JsonElement read(com.google.gson.stream.JsonReader r,int depth) throws java.io.IOException {
+        if(depth>16) throw new IllegalArgumentException("JSON nesting cap exceeded");
+        return switch(r.peek()) {
+            case BEGIN_OBJECT -> {
+                r.beginObject(); JsonObject o=new JsonObject();
+                while(r.hasNext()) {
+                    String key=r.nextName();
+                    if(o.has(key)) throw new IllegalArgumentException("duplicate JSON member");
+                    o.add(key,read(r,depth+1));
+                }
+                r.endObject(); yield o;
+            }
+            case BEGIN_ARRAY -> {
+                r.beginArray(); JsonArray a=new JsonArray();
+                while(r.hasNext()) a.add(read(r,depth+1));
+                r.endArray(); yield a;
+            }
+            case STRING -> new JsonPrimitive(r.nextString());
+            case NUMBER -> new JsonPrimitive(new java.math.BigDecimal(r.nextString()));
+            case BOOLEAN -> new JsonPrimitive(r.nextBoolean());
+            case NULL -> { r.nextNull(); yield JsonNull.INSTANCE; }
+            default -> throw new IllegalArgumentException("invalid JSON");
+        };
     }
     private static PublicAgent agent(JsonObject o) {
         shape(o,"id name skin state station active paused awaitingUser activity");
@@ -111,7 +144,9 @@ public final class PublicJson {
     }
     private static int num(JsonObject o,String k,int min,int max) {
         JsonElement e=o.get(k); if(e==null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isNumber()) throw new IllegalArgumentException("expected integer");
-        int n=e.getAsBigDecimal().intValueExact(); if(n<min || n>max) throw new IllegalArgumentException("integer out of range"); return n;
+        try {
+            int n=e.getAsBigDecimal().intValueExact(); if(n<min || n>max) throw new IllegalArgumentException("integer out of range"); return n;
+        } catch(ArithmeticException e2) { throw new IllegalArgumentException("expected integer"); }
     }
     private static <E extends Enum<E>> E en(JsonElement e,Class<E> type) {
         String s=string(e,32);

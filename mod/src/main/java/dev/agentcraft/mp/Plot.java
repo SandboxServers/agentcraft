@@ -10,7 +10,7 @@ public record Plot(int index, StudioId owner, BlockPos origin) {
         Objects.requireNonNull(owner);
         origin = origin.immutable();
     }
-    public AABB box() { return new AABB(-46, 60, -36, 46, 100, 54).move(origin); }
+    public AABB box() { return new AABB(-46, 60, -36, 47, 101, 55).move(origin); }
     // Site coordinates are inclusive, like the HQ plan and Anchors.Bounds.
     public boolean contains(BlockPos pos) {
         int x = pos.getX() - origin.getX(), y = pos.getY() - origin.getY(), z = pos.getZ() - origin.getZ();

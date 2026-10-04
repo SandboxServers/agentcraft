@@ -12,6 +12,10 @@ public record MpServerConfig(boolean enabled, int plotStride, boolean autoAlloca
     public static final MpServerConfig DEFAULT = new MpServerConfig(false,128,true,true,true,true,true,12,4,10);
     private static volatile MpServerConfig current = DEFAULT;
     public static MpServerConfig current() { return current; }
+    /** Scoped test/config override; restore the returned value in finally. */
+    public static MpServerConfig install(MpServerConfig config) {
+        MpServerConfig previous=current; current=Objects.requireNonNull(config); return previous;
+    }
     public static void init() {
         ServerLifecycleEvents.SERVER_STARTING.register(server -> {
             current = server.isDedicatedServer() ? load(FabricLoader.getInstance().getConfigDir().resolve("agentcraft-server.json")) : DEFAULT;
@@ -30,7 +34,7 @@ public record MpServerConfig(boolean enabled, int plotStride, boolean autoAlloca
                 bool(root,"autoAllocate",true),bool(root,"autoBuild",true),bool(root,"forceCreative",true),
                 bool(root,"worldRules",true),bool(root,"protectPlots",true), number(root,"relayRadiusChunks",12,0,1024,false),
                 number(root,"publicStatePerSecond",4,1,1000,false),number(root,"intentsPerSecond",10,1,1000,false));
-        MpLog.event(MpEvents.CONFIG_LOADED,"enabled",config.enabled(),"file","config/agentcraft-server.json");
+        MpLog.event(MpEvents.CONFIG_LOADED,"enabled",config.enabled(),"file",Files.exists(file)?"config/agentcraft-server.json":"none");
         return config;
     }
     private static void invalid(String key, String value) { MpLog.event(MpEvents.CONFIG_INVALID,"key",key,"value",value); }

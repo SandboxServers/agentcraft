@@ -42,7 +42,7 @@ class StudiosTest {
             MpMode.joined(true,"integrated"); assertFalse(MpMode.receiveHello(hello,true,player));
             assertEquals(MpMode.SINGLEPLAYER,MpMode.current()); assertEquals(StudioId.LOCAL,Anchors.self());
             MpMode.joined(false,MpMode.hashServer("example.invalid:25600"));
-            assertFalse(MpMode.receiveHello(new HelloS2C(2,id,-1,new ServerInfo(128,12)),false,player));
+            assertFalse(MpMode.receiveHello(new HelloS2C(2,id,-1,new ServerInfo(128,12,4,10)),false,player));
             assertFalse(MpMode.receiveHello(hello,false,UUID.randomUUID()));
             for(int i=0;i<100;i++) MpMode.tick(); assertEquals(MpMode.REMOTE_VANILLA,MpMode.current());
             assertTrue(MpMode.receiveHello(hello,false,player)); assertEquals(MpMode.MULTIPLAYER,MpMode.current());
@@ -57,5 +57,71 @@ class StudiosTest {
             assertFalse(capture.lines().toString().contains("example.invalid")); assertFalse(capture.lines().toString().contains("secret"));
         }
         MpMode.disconnected(); assertEquals(MpMode.SINGLEPLAYER,MpMode.current()); assertEquals(StudioId.LOCAL,Studios.own().id());
+    }
+    @Test void retained_hello_plot_and_disconnect_are_client_executor_owned() throws Exception {
+        UUID player=UUID.randomUUID(); StudioId id=StudioId.of(player), remote=StudioId.of(UUID.randomUUID());
+        var info=new ServerInfo(256,24,7,19);
+        MpMode.joined(false,"test"); assertTrue(MpMode.serverInfo().isEmpty());
+        assertTrue(MpMode.receiveHello(new HelloS2C(1,id,3,info),false,player));
+        assertEquals(Optional.of(info),MpMode.serverInfo());
+        assertEquals(PlotGrid.originOf(3,256),Studios.plot(id).orElseThrow().origin());
+        assertTrue(Studios.plot(remote).isEmpty());
+        List<Runnable> queue=new ArrayList<>();
+        boolean[] bridgeActive={true};
+        Anchors.addStudioListener((studio,layout)-> { if(bridgeActive[0]) Studios.anchorsChanged(queue::add,studio,layout); });
+        List<Thread> mutations=new ArrayList<>();
+        MpMode.addListener(mode->{ if(bridgeActive[0]) mutations.add(Thread.currentThread()); });
+        Studios.addListener((studio,view)-> { if(bridgeActive[0]) mutations.add(Thread.currentThread()); });
+        try {
+            var layout=Anchors.builder("remote").bounds(1000,60,1000,1010,100,1010).build();
+            Anchors.publish(remote,layout); drain(queue);
+            assertEquals(layout,Studios.view(remote).orElseThrow().layout());
+            var updated=Anchors.builder("updated").spot("desk",1000,66,1000,0).build();
+            Anchors.publish(remote,updated); drain(queue);
+            assertEquals(updated,Studios.view(remote).orElseThrow().layout());
+            Anchors.publish(remote,Anchors.Layout.EMPTY); drain(queue); assertTrue(Studios.view(remote).isPresent());
+            Anchors.remove(remote); drain(queue); assertTrue(Studios.view(remote).isEmpty());
+            // Leave a publication queued when the network disconnect arrives.
+            Anchors.publish(remote,layout);
+            Thread network=new Thread(()->MpMode.disconnectOn(queue::add)); network.start(); network.join();
+            assertEquals(MpMode.MULTIPLAYER,MpMode.current()); assertEquals(Optional.of(info),MpMode.serverInfo());
+            drain(queue);
+            assertEquals(MpMode.SINGLEPLAYER,MpMode.current()); assertTrue(MpMode.serverInfo().isEmpty());
+            assertEquals(StudioId.LOCAL,Anchors.self()); assertTrue(Studios.plot(id).isEmpty());
+            assertTrue(Studios.view(remote).isEmpty()); assertEquals(1,Studios.all().size());
+            assertTrue(mutations.stream().allMatch(thread->thread==Thread.currentThread()));
+            MpMode.joined(false,"test"); assertTrue(MpMode.serverInfo().isEmpty());
+        } finally { bridgeActive[0]=false; }
+    }
+    private static void drain(List<Runnable> queue) { while(!queue.isEmpty()) queue.removeFirst().run(); }
+    @Test void singleplayer_never_times_out_remote_waits_exactly_100_ticks_and_rejections_are_visible() {
+        MpMode.disconnected();
+        try(var capture=MpLog.capture()) {
+            MpMode.joined(true,"integrated"); for(int i=0;i<200;i++) MpMode.tick();
+            assertEquals(MpMode.SINGLEPLAYER,MpMode.current()); assertTrue(capture.lines().isEmpty());
+            MpMode.joined(false,"test"); for(int i=0;i<99;i++) MpMode.tick();
+            assertEquals(MpMode.SINGLEPLAYER,MpMode.current()); MpMode.tick(); assertEquals(MpMode.REMOTE_VANILLA,MpMode.current());
+        }
+        MpMode.joined(false,"test"); UUID player=UUID.randomUUID(); StudioId id=StudioId.of(player);
+        try(var capture=MpLog.capture()) {
+            assertFalse(MpMode.receiveHello(new HelloS2C(2,id,-1,new ServerInfo(128,12,4,10)),false,player));
+            assertTrue(capture.lines().stream().anyMatch(line->line.contains("event=hello_received protocol=2 mode=SINGLEPLAYER")));
+            assertTrue(MpMode.inactiveMessage().contains("hello rejected"));
+            assertFalse(MpMode.receiveHello(new HelloS2C(1,id,Integer.MAX_VALUE,new ServerInfo(1048576,12,4,10)),false,player));
+            assertEquals(StudioId.LOCAL,Anchors.self()); assertTrue(MpMode.serverInfo().isEmpty());
+            for(int i=0;i<100;i++) MpMode.tick(); assertEquals(MpMode.REMOTE_VANILLA,MpMode.current());
+        }
+        MpMode.disconnected(); assertFalse(MpMode.inactiveMessage().contains("rejected"));
+    }
+    @Test void address_hash_is_salted_and_registry_lookup_reuses_immutable_views() throws Exception {
+        String address="example.invalid:25600";
+        String plain=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(address.getBytes(java.nio.charset.StandardCharsets.UTF_8))).substring(0,16);
+        assertNotEquals(plain,MpMode.hashServer(address)); assertEquals(MpMode.hashServer(address),MpMode.hashServer(address));
+        Studios.reset(); BlockPos pos=new BlockPos(0,66,0);
+        assertSame(Studios.own(),Studios.own()); assertSame(Studios.at(pos),Studios.at(pos));
+        StudioView before=Studios.own(); Studios.updatePresence(StudioId.LOCAL,"owner",false);
+        assertNotSame(before,Studios.own()); assertFalse(Studios.own().online());
+        var layout=Anchors.builder("new").spot("desk",0,66,0,0).build(); Anchors.publish(layout);
+        assertSame(layout,Studios.own().layout());
     }
 }

@@ -21,7 +21,9 @@ public final class PlotGrid {
         else if (d < 2*side) { x=-k; z=-k+(d-side); }
         else if (d < 3*side) { x=-k+(d-2*side); z=k; }
         else { x=k; z=k-(d-3*side); }
-        return new BlockPos(Math.toIntExact(x*stride), 0, Math.toIntExact(z*stride));
+        long bx=x*stride, bz=z*stride;
+        if(Math.abs(bx)>30000000 || Math.abs(bz)>30000000) throw new IllegalArgumentException("plot origin out of range");
+        return new BlockPos((int)bx, 0, (int)bz);
     }
     /** Resolve the site footprint; roads between sites return empty. */
     public static OptionalInt indexAt(int x, int z, int stride) {

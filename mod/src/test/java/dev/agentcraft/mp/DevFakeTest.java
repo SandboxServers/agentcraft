@@ -36,4 +36,25 @@ class DevFakeTest {
             req.addProperty("overlay","true"); assertThrows(RuntimeException.class,()->MpDevFake.apply(req));
         } finally { Studios.reset(); Anchors.publish(Anchors.Layout.EMPTY); }
     }
+    @Test void none_goal_overlay_callback_and_invalid_numbers_follow_dev_contract() {
+        Studios.reset(); Anchors.publish(Anchors.builder("studio").bounds(-46,60,-36,46,100,54).build());
+        JsonObject state=PublicJson.toJson(CodecTest.state());
+        state.getAsJsonObject("goal").addProperty("status","none"); state.getAsJsonObject("goal").addProperty("progress",0);
+        JsonObject request=new JsonObject(); request.add("state",state);
+        List<Boolean> overlayAtNotification=new ArrayList<>(); boolean[] active={true};
+        Studios.addListener((id,view)-> { if(active[0] && id.equals(MpDevFake.FAKE) && view!=null) overlayAtNotification.add(!Studios.at(new BlockPos(0,66,0)).orElseThrow().own()); });
+        try {
+            MpDevFake.apply(request); assertEquals(List.of(true),overlayAtNotification);
+            var goal=Studios.view(MpDevFake.FAKE).orElseThrow().publicState().goal();
+            assertEquals(new GoalSummary(GoalStatusWire.NONE,0,null),goal); assertEquals("none",goal.status().wire());
+            var publicState=Studios.view(MpDevFake.FAKE).orElseThrow().publicState();
+            assertEquals(publicState,CodecTest.round(dev.agentcraft.mp.net.PublicStateC2S.CODEC,new dev.agentcraft.mp.net.PublicStateC2S(publicState)).state());
+            request.addProperty("overlay",false); MpDevFake.apply(request); assertEquals(List.of(true,false),overlayAtNotification);
+            for(Number rev:List.of(1.5,new java.math.BigDecimal("1e99"))) {
+                state.addProperty("rev",rev);
+                var error=assertThrows(dev.agentcraft.client.dev.DevBridge.DevException.class,()->MpDevFake.apply(request));
+                assertEquals("invalid public studio fixture: expected integer",error.getMessage());
+            }
+        } finally { active[0]=false; Studios.reset(); Anchors.publish(Anchors.Layout.EMPTY); }
+    }
 }

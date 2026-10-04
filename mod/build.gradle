@@ -115,5 +115,9 @@ sourceSets.test.compileClasspath += sourceSets.client.output + sourceSets.client
 sourceSets.test.runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
 test {
     useJUnitPlatform()
-    workingDir rootProject.projectDir
+    def work = layout.buildDirectory.dir("test-work")
+    workingDir work
+    doFirst { work.get().asFile.mkdirs() }
+    systemProperty "agentcraft.src", file("src").absolutePath
+    inputs.dir("src")
 }

@@ -40,4 +40,14 @@ class AnchorsTest {
         var o=new HqBuilder.Options(true); assertTrue(o.force()); assertEquals(BlockPos.ZERO,o.origin()); assertEquals(StudioId.LOCAL,o.studio());
         assertEquals(new HqBuilder.Options(false),HqBuilder.Options.DEFAULT);
     }
+    @Test void identity_noop_does_not_notify_and_snapshot_publish_preserves_revision() {
+        Anchors.setSelf(StudioId.LOCAL); int[] calls={0}; boolean[] active={true};
+        Anchors.addListener(layout->{ if(active[0]) calls[0]++; });
+        try {
+            Anchors.setSelf(StudioId.LOCAL); assertEquals(0,calls[0]);
+            var snapshot=new Anchors.Layout("studio",7,null,Map.of()); Anchors.publish(snapshot);
+            assertEquals(7,Anchors.current().revision()); assertEquals(1,calls[0]);
+            Anchors.remove(StudioId.LOCAL); Anchors.setSelf(StudioId.LOCAL); assertEquals(2,calls[0]);
+        } finally { active[0]=false; Anchors.publish(Anchors.Layout.EMPTY); }
+    }
 }

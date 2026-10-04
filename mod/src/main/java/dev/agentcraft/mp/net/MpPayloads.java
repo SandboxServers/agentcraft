@@ -37,7 +37,7 @@ public final class MpPayloads {
     public static Optional<HelloS2C> helloFor(UUID player,MpServerConfig config,boolean dedicated,boolean canSend) {
         if(!dedicated || !config.enabled() || !canSend) return Optional.empty();
         StudioId id=StudioId.of(player); int plot=Plots.directory().plotOf(id).map(Plot::index).orElse(-1);
-        return Optional.of(new HelloS2C(MpProtocol.VERSION,id,plot,new ServerInfo(config.plotStride(),config.relayRadiusChunks())));
+        return Optional.of(new HelloS2C(MpProtocol.VERSION,id,plot,new ServerInfo(config.plotStride(),config.relayRadiusChunks(),config.publicStatePerSecond(),config.intentsPerSecond())));
     }
     public static void logSent(HelloS2C hello) {
         MpLog.event(MpEvents.HELLO_SENT,"player",hello.you().owner(),"studio",hello.you().owner(),"plot",hello.plotIndex(),"protocol",hello.protocol());
