@@ -65,23 +65,35 @@ public class CodecTest {
         });
     }
     @Test void layout_and_hello_presence_event_and_intent_caps_are_checked_at_decode() {
-        assertDecodeFails(HelloC2S.CODEC,new HelloC2S(1,"x".repeat(33)));
-        assertDecodeFails(PresenceS2C.CODEC,new PresenceS2C(StudioId.LOCAL,"x".repeat(17),true));
-        assertDecodeFails(LayoutS2C.CODEC,new LayoutS2C(StudioId.LOCAL,0,Anchors.builder("studio").spot("x".repeat(49),0,65,0,0).build()));
-        var builder=Anchors.builder("studio"); for(int i=0;i<513;i++) builder.spot("a"+i,0,65,0,0);
-        assertDecodeFails(LayoutS2C.CODEC,new LayoutS2C(StudioId.LOCAL,0,builder.build()));
-        assertDecodeFails(LayoutS2C.CODEC,new LayoutS2C(StudioId.LOCAL,0,Anchors.builder("x".repeat(49)).build()));
-        for(var e:List.of(new PublicEvent.Say("x".repeat(17),null,null,1),new PublicEvent.Say("kit","x".repeat(17),null,1),new PublicEvent.Say("kit",null,"x".repeat(121),1),new PublicEvent.TaskDone("x".repeat(17)))) assertDecodeFails(StudioEventC2S.CODEC,new StudioEventC2S(e));
-        Map<String,LampStatusWire> lamps=new HashMap<>(); Set<String> lit=new HashSet<>();
-        for(int i=0;i<65;i++) { lamps.put("agent:b"+i,LampStatusWire.OFF); lit.add("a"+i); }
-        assertDecodeFails(WorldIntentC2S.CODEC,new WorldIntentC2S(new WorldIntent(1,lamps,false,false,Set.of())));
-        assertDecodeFails(WorldIntentC2S.CODEC,new WorldIntentC2S(new WorldIntent(1,Map.of(),false,false,lit)));
+        // An oversized record cannot be built, so each one-over wire form is written by hand.
+        refused(HelloC2S.CODEC,b->{ b.writeVarInt(1); b.writeUtf("x".repeat(33)); });
+        refused(PresenceS2C.CODEC,b->{ b.writeUUID(StudioId.LOCAL.owner()); b.writeUtf("x".repeat(17)); b.writeBoolean(true); });
+        var atCaps=buf(); try { layout(atCaps,"x".repeat(48),512,"a".repeat(45)); assertEquals(512,LayoutS2C.CODEC.decode(atCaps).layout().anchors().size()); } finally { atCaps.release(); }
+        refused(LayoutS2C.CODEC,b->layout(b,"studio",1,"x".repeat(49)));
+        refused(LayoutS2C.CODEC,b->layout(b,"studio",513,"a"));
+        refused(LayoutS2C.CODEC,b->layout(b,"x".repeat(49),0,"a"));
+        for(var over:Map.of("agentId",17,"to",17,"text",121).entrySet()) refused(StudioEventC2S.CODEC,b->{
+            var o=PublicJson.toJson(new PublicEvent.Say("kit","user","hi",2)); o.addProperty(over.getKey(),"x".repeat(over.getValue())); b.writeUtf(o.toString());
+        });
+        refused(StudioEventC2S.CODEC,b->{ var o=PublicJson.toJson(new PublicEvent.TaskDone("kit")); o.addProperty("agentId","x".repeat(17)); b.writeUtf(o.toString()); });
+        for(boolean binding:List.of(true,false)) refused(WorldIntentC2S.CODEC,b->{
+            var o=PublicJson.toJson(new WorldIntent(1,Map.of(),false,false,Set.of()));
+            for(int i=0;i<65;i++) { if(binding) o.getAsJsonObject("lamps").addProperty("agent:b"+i,"off"); else o.getAsJsonArray("litMonitors").add("a"+i); }
+            b.writeUtf(o.toString());
+        });
         for(boolean binding:List.of(true,false)) {
             var raw=PublicJson.toJson(new WorldIntent(1,Map.of(),false,false,Set.of()));
             if(binding) raw.getAsJsonObject("lamps").addProperty("x".repeat(49),"off");
             else raw.getAsJsonArray("litMonitors").add("x".repeat(17));
             var b=buf(); try { b.writeUtf(raw.toString()); assertThrows(RuntimeException.class,()->WorldIntentC2S.CODEC.decode(b)); } finally { b.release(); }
         }
+    }
+    private static void layout(RegistryFriendlyByteBuf b,String name,int anchors,String key) {
+        b.writeUUID(StudioId.LOCAL.owner()); b.writeVarInt(0); b.writeUtf(name); b.writeVarLong(0); b.writeBoolean(false); b.writeVarInt(anchors);
+        for(int i=0;i<anchors;i++) { b.writeUtf(key+String.format("%03d",i)); b.writeDouble(0); b.writeDouble(65); b.writeDouble(0); b.writeFloat(0); b.writeFloat(0); }
+    }
+    private static <T> void refused(StreamCodec<RegistryFriendlyByteBuf,T> c,Consumer<RegistryFriendlyByteBuf> wire) {
+        var b=buf(); try { wire.accept(b); assertThrows(RuntimeException.class,()->c.decode(b)); } finally { b.release(); }
     }
     private static <T> void assertDecodeFails(StreamCodec<RegistryFriendlyByteBuf,T> c,T v) {
         var b=buf(); try { c.encode(b,v); assertThrows(RuntimeException.class,()->c.decode(b)); } finally { b.release(); }

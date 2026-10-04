@@ -83,11 +83,11 @@ Parallel packets build against these names. Source roots: `mod/src/main/java/dev
 
 ### Payloads (all in `main/mp/net/`, registered once by `MpPayloads.register()`)
 
-The protocol version is `MpProtocol.VERSION = 1`. Every codec enforces caps (the "caps" column), so an oversized or malformed payload is refused at decode time and never reaches a handler. Names: `agentcraft:<id>`.
+The protocol version is `MpProtocol.VERSION = 1`. Every codec enforces caps (the "caps" column), so an oversized or malformed payload is refused at decode time and never reaches a handler. The same caps are refused where a record is built (an `IllegalArgumentException` naming the field), so an oversized record fails in its caller, on the caller's thread, and never reaches the encoder. Both hello codecs read `protocol` first; a hello of another protocol has the rest of its bytes skipped and decodes to a placeholder that the receiver refuses by the protocol alone, so a version mismatch is reported instead of ending the connection. `protocol` must stay the first field, a VarInt, in every later protocol. Names: `agentcraft:<id>`.
 
 | Payload | Direction | Fields | Caps | Handler owner |
 |---|---|---|---|---|
-| `HelloS2C` | S→C | `protocol`, `you: StudioId`, `plotIndex` (−1 = none yet), `ServerInfo{plotStride, relayRadiusChunks, publicStatePerSecond, intentsPerSecond}` | | MP-F (mode detection) |
+| `HelloS2C` | S→C | `protocol`, `you: StudioId`, `plotIndex` (−1 = none yet), `ServerInfo{plotStride, relayRadiusChunks, publicStatePerSecond, intentsPerSecond}` | stride and rates checked at decode; a plot the grid cannot place decodes and is refused by `MpMode.receiveHello` | MP-F (mode detection) |
 | `HelloC2S` | C→S | `protocol`, `modVersion` | version ≤ 32 chars | MP-F (logs; server marks the player as mod-equipped) |
 | `LayoutS2C` | S→C | `studio`, `plotIndex`, `Layout` (name, revision, bounds, anchors) | ≤ 512 anchors, names ≤ 48 chars | MP-04 |
 | `LayoutRemoveS2C` | S→C | `studio` | | MP-04 |
@@ -105,7 +105,7 @@ The protocol version is `MpProtocol.VERSION = 1`. Every codec enforces caps (the
 record PublicStudioState(int rev, boolean foremanOnline, List<PublicAgent> agents /* ≤ 16 */,
                          Counts counts, GoalSummary goal, List<CiSlot> ci /* ≤ 8 */,
                          PublicPolicy policy, @Nullable List<PublicTask> tasks /* opt-in, ≤ 32 */)
-record PublicAgent(String id, String name, String skin,      // cast ids/names, ≤ 16 chars
+record PublicAgent(String id, String name, String skin,      // id and skin: an identifier path [a-z0-9/._-], ≤ 16 chars; name ≤ 16 chars
                    AgentStateWire state, StationWire station, // validated enums
                    boolean active, boolean paused, boolean awaitingUser,
                    @Nullable String activity)                 // opt-in, ≤ 48 chars
@@ -120,7 +120,7 @@ record WorldIntent(int rev, Map<String, LampStatusWire> lamps /* binding → sta
                    boolean podiumOpen, boolean mergeActive, Set<String> litMonitors /* agent ids */)
 ```
 
-- Every string is sanitized at the codec (length cap; `§` formatting codes, control and format characters, line and paragraph separators and unpaired surrogates stripped). Every enum is the wire value, validated. A state or event the server accepts always re-encodes within its envelope, so it can be relayed.
+- Every string is sanitized at the codec (length cap; `§` formatting codes, control and format characters, line and paragraph separators and unpaired surrogates stripped). Every enum is the wire value, validated. A state or event the server accepts always re-encodes within its envelope, so it can be relayed. An agent `id` or `skin` that is not a valid identifier path after sanitizing is refused, at decode and where the record is built: a viewer's client builds resource identifiers from both, and the game throws on any other character.
 - `GoalStatusWire` has `NONE` (wire `none`) for a studio with no current goal, sent with `progress` 0 and `text` null. The other wire enums carry the Foreman protocol's values only.
 - `WorldIntent.lamps` keys are binding names of exactly these forms: `agent:<agent id, 1 to 16 chars>`, `ci:#1` to `ci:#8`, `goal`, `goal:atrium`, `decisions`, `merge`, `beacon`. Any other key, and any key that sanitizing would change, is refused when the record is built and at decode (`WorldIntent.isBinding(String)`). A repo id is never a key: `ci:<repoId>` is not sent.
 - Opt-in fields are `null` unless the owner's `PublicPolicy` flag is on. The publisher (MP-05) fills them. The record makes "on by accident" structurally visible in review, and enforces it: a `PublicStudioState` that carries an activity, a goal text or a task list while that policy flag is off cannot be built, encoded or decoded. `Say.text` has no such guard, because an event carries no policy: MP-05 withholds it on send and MP-06 on relay, both from the studio's current `sayText`.
@@ -306,7 +306,7 @@ Tests:
 
 - **Unit (JUnit, new in this packet):**
   - every payload's codec round-trips;
-  - every cap is enforced (17 agents, a 49-char anchor name and a 121-char opt-in text are each refused at decode);
+  - every cap is enforced (17 agents, a 49-char anchor name and a 121-char opt-in text are each refused at decode and where the record is built);
   - sanitization strips `§` and control characters;
   - `PlotGrid` spiral: indexes 0..200 give distinct origins, 16-aligned, with no overlapping boxes at stride 128, and `indexAt(originOf(i)) == i`;
   - `Anchors.Builder.origin` offsets every anchor and the bounds;
@@ -451,7 +451,7 @@ Tests: unit tests for the in-range set computation. Harness (needs MP-03's regis
   - `rev` is the scheduler's own counter, starting at 1 for each connection and stamped when a state is sent. The `Redactor` stays pure and leaves it 0. "Unchanged" compares the content without `rev`. Nobody compares revs on receipt: the latest state wins.
   - A protocol value the wire cannot carry is mapped, never sent: agent state `UNKNOWN` to `idle`, station `UNKNOWN` to `desk`, goal status `UNKNOWN` and "no goal" to `none` (progress 0, no text). A task whose status is `UNKNOWN` is left out of `tasks` and of `counts`.
   - `counts.openDecisions` is every open decision, merges included. `counts.openMerges` is the merge subset.
-  - Every string is cut to its cap and sanitized by the `Redactor`, and a blank opt-in text becomes `null`: the codec refuses rather than trims, and a refused state disconnects the owner.
+  - Every string is cut to its cap and sanitized by the `Redactor`, and a blank opt-in text becomes `null`: the codec refuses rather than trims, and a refused state disconnects the owner. A record over a cap, or an agent whose id or skin is not an identifier path, throws where the `Redactor` builds it, so it leaves such an agent out and replaces such a skin.
   - Events are sent as they happen, at most `publicStatePerSecond` per second; the excess is dropped. `Say.text` is `null` unless `sayText` is on. `Say.length` is always sent.
   - The publisher only sends. It never writes the public projection into `Studios` for the owner's own id.
 - **`PolicyStore`:** the owner's flags, persisted client-side (`<gameDir>/config/agentcraft-public.json`), all false by default (D-MP01). There is a `/agentcraft-public` client command or console command to view and toggle them (UI polish is MP-Z's).
