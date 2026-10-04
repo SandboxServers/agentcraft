@@ -2,11 +2,14 @@ package dev.agentcraft.client.mp.visitor;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import dev.agentcraft.AgentCraft;
 import dev.agentcraft.block.ModBlocks;
 import dev.agentcraft.block.entity.StationBlockEntity;
 import dev.agentcraft.client.agents.AgentCardScreen;
 import dev.agentcraft.client.dev.DevBridge;
 import dev.agentcraft.client.dev.Fields;
+import dev.agentcraft.client.hud.Keys;
+import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.client.mp.RemoteAgentClicks;
 import dev.agentcraft.client.mp.StudioView;
 import dev.agentcraft.client.mp.Studios;
@@ -20,10 +23,13 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.event.Event;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
@@ -31,6 +37,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
@@ -41,8 +48,9 @@ import org.jspecify.annotations.Nullable;
  * (MP-08 fires it; MP-11 never edits {@code AgentsFeature}).
  *
  * <p>Own-studio and singleplayer clicks are untouched: the gate only takes the visitor path when
- * {@link Studios#at(BlockPos)} resolves a studio that is not the viewer's own. The console key and
- * the decisions key still talk to the local Foreman, because the gate sits on block clicks only.
+ * {@link Studios#at(BlockPos)} resolves a studio that is not the viewer's own. In multiplayer a
+ * station in no known studio opens nothing ({@link Route#CONSUMED}), and the terminal key follows
+ * the same route. The console key and the decisions key still talk to the local Foreman.
  *
  * <p>DevBridge: {@code dev.visitor.use} opens the panel, {@code dev.visitor.click} runs the real
  * {@link UseBlockCallback} at a position, {@code dev.visitor.agent} fires the agent seam, and
@@ -50,6 +58,8 @@ import org.jspecify.annotations.Nullable;
  */
 public final class VisitorFeature {
 	private static final Map<Block, Station> STATIONS = new ConcurrentHashMap<>();
+	/** A tick phase ahead of the default one, in which the console polls its terminal key. */
+	private static final Identifier BEFORE_HANDLERS = AgentCraft.id("visitor_gate");
 
 	private VisitorFeature() {
 	}
@@ -63,6 +73,8 @@ public final class VisitorFeature {
 		STATIONS.put(Blocks.LECTERN, Station.LECTERN);
 		STATIONS.put(ModBlocks.CONSOLE_TERMINAL, Station.CONSOLE);
 		StationInteractions.setGate(VisitorFeature::before);
+		ClientTickEvents.END_CLIENT_TICK.addPhaseOrdering(BEFORE_HANDLERS, Event.DEFAULT_PHASE);
+		ClientTickEvents.END_CLIENT_TICK.register(BEFORE_HANDLERS, VisitorFeature::gateTerminalKey);
 		RemoteAgentClicks.set(VisitorFeature::openAgentCard);
 		DevBridge.registerScreen("visitor", mc -> {
 			for (StudioView view : Studios.all()) {
@@ -84,12 +96,41 @@ public final class VisitorFeature {
 		Optional<StudioView> at = Studios.at(pos);
 		Optional<Station> kind = VisitorGate.visitorKind(at, STATIONS.get(state.getBlock()));
 		if (kind.isEmpty()) {
-			return false;
+			// the own handler runs, except in multiplayer outside every known studio: nothing opens there
+			return VisitorGate.route(multiplayer(), at) == Route.CONSUMED;
 		}
 		StudioView studio = at.orElseThrow();
 		VisitorGate.logOpen(kind.get(), studio, player.getUUID());
 		Minecraft.getInstance().gui.setScreen(new VisitorStationScreen(studio.id(), kind.get()));
 		return true;
+	}
+
+	private static boolean multiplayer() {
+		return MpMode.current() == MpMode.MULTIPLAYER;
+	}
+
+	/**
+	 * The terminal key (Enter while looking at a console terminal) opens the own console without a
+	 * click. In multiplayer, on a terminal outside the own studio, its presses are taken here, a phase
+	 * ahead of the console's key handler, and gated like a click. Otherwise the key is not read.
+	 */
+	private static void gateTerminalKey(Minecraft mc) {
+		if (!multiplayer() || Keys.terminal == null || mc.player == null || mc.level == null || mc.gui.screen() != null
+			|| !(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) {
+			return;
+		}
+		BlockState state = mc.level.getBlockState(hit.getBlockPos());
+		if (state.getBlock() != ModBlocks.CONSOLE_TERMINAL
+			|| VisitorGate.route(true, Studios.at(hit.getBlockPos())) == Route.HANDLER) {
+			return;
+		}
+		boolean pressed = false;
+		while (Keys.terminal.consumeClick()) {
+			pressed = true;
+		}
+		if (pressed) {
+			before(mc.player, hit.getBlockPos(), state, null);
+		}
 	}
 
 	/** The {@link RemoteAgentClicks} handler: a read-only card built from the public state only. */
@@ -100,7 +141,7 @@ public final class VisitorFeature {
 		}
 		// the registry's current view, and only a remote one: the own studio keeps its own card
 		Optional<StudioView> view = Studios.view(studio.id());
-		if (VisitorGate.route(view) != Route.VISITOR) {
+		if (VisitorGate.route(multiplayer(), view) != Route.VISITOR) {
 			return;
 		}
 		Optional<PublicAgent> agent = VisitorGate.findAgent(view.get(), agentId);
@@ -128,7 +169,7 @@ public final class VisitorFeature {
 						throw new DevBridge.DevException("no player");
 					}
 					StudioView studio = resolveStudio(studioArg);
-					if (VisitorGate.route(Optional.of(studio)) != Route.VISITOR) {
+					if (VisitorGate.route(multiplayer(), Optional.of(studio)) != Route.VISITOR) {
 						throw new DevBridge.DevException("studio is not remote; a click opens the real station");
 					}
 					VisitorGate.logOpen(kind, studio, mc.player.getUUID());

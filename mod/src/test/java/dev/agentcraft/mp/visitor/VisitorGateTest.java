@@ -2,7 +2,9 @@ package dev.agentcraft.mp.visitor;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.client.mp.StudioView;
+import dev.agentcraft.client.mp.Studios;
 import dev.agentcraft.client.mp.visitor.VisitorGate;
 import dev.agentcraft.client.mp.visitor.VisitorGate.Route;
 import dev.agentcraft.client.mp.visitor.VisitorGate.Station;
@@ -10,6 +12,9 @@ import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
 import dev.agentcraft.mp.StudioId;
+import dev.agentcraft.mp.net.HelloS2C;
+import dev.agentcraft.mp.net.MpProtocol;
+import dev.agentcraft.mp.net.ServerInfo;
 import dev.agentcraft.mp.state.AgentStateWire;
 import dev.agentcraft.mp.state.Counts;
 import dev.agentcraft.mp.state.GoalStatusWire;
@@ -25,6 +30,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
+import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 
 /** MP-11: the pure visitor routing table, the public-only copy, the panel fit and the telemetry capture. */
@@ -47,11 +53,40 @@ class VisitorGateTest {
 			new GoalSummary(GoalStatusWire.ACTIVE, 0.4f, "SECRET-GOAL"), List.of(), policy, tasks);
 	}
 
-	@Test void routing_sends_only_remote_studios_to_the_visitor_panel() {
-		assertEquals(Route.HANDLER, VisitorGate.route(Optional.empty()));
-		assertEquals(Route.HANDLER, VisitorGate.route(Optional.of(own())));
-		assertEquals(Route.VISITOR, VisitorGate.route(Optional.of(remote(null))));
-		assertEquals(Route.VISITOR, VisitorGate.route(Optional.of(remote(leakyState()))));
+	@Test void singleplayer_routing_is_todays_handler_except_for_the_overlay_studio() {
+		assertEquals(Route.HANDLER, VisitorGate.route(false, Optional.empty()));
+		assertEquals(Route.HANDLER, VisitorGate.route(false, Optional.of(own())));
+		assertEquals(Route.VISITOR, VisitorGate.route(false, Optional.of(remote(null))));
+		assertEquals(Route.VISITOR, VisitorGate.route(false, Optional.of(remote(leakyState()))));
+	}
+
+	@Test void multiplayer_routing_takes_the_own_handler_only_in_the_own_studio() {
+		assertEquals(Route.HANDLER, VisitorGate.route(true, Optional.of(own())));
+		assertEquals(Route.VISITOR, VisitorGate.route(true, Optional.of(remote(null))));
+		// no known studio: never the own handler
+		assertEquals(Route.CONSUMED, VisitorGate.route(true, Optional.empty()));
+	}
+
+	@Test void multiplayer_knows_the_own_plot_from_the_hello_and_consumes_an_unsynced_neighbour() {
+		UUID player = UUID.randomUUID();
+		StudioId bob = StudioId.of(UUID.randomUUID());
+		BlockPos ownPlot = new BlockPos(0, 66, 0);
+		BlockPos bobPlot = new BlockPos(128, 66, 0);
+		try {
+			MpMode.joined(false, "test");
+			MpMode.receiveHello(new HelloS2C(MpProtocol.VERSION, StudioId.of(player), 0, new ServerInfo(128, 12, 4, 10)), false, player);
+			boolean multiplayer = MpMode.current() == MpMode.MULTIPLAYER;
+			// the hello's plot is enough: the own stations work before the own layout arrives
+			assertEquals(Route.HANDLER, VisitorGate.route(multiplayer, Studios.at(ownPlot)));
+			// a neighbour's plot with nothing synced, then with the plot alone: consumed
+			assertEquals(Route.CONSUMED, VisitorGate.route(multiplayer, Studios.at(bobPlot)));
+			Studios.setPlot(bob, 1, 128);
+			assertEquals(Route.CONSUMED, VisitorGate.route(multiplayer, Studios.at(bobPlot)));
+			Studios.updatePresence(bob, "Bob", true);
+			assertEquals(Route.VISITOR, VisitorGate.route(multiplayer, Studios.at(bobPlot)));
+		} finally {
+			MpMode.disconnected();
+		}
 	}
 
 	@Test void agent_lookup_resolves_from_the_current_public_state() {
