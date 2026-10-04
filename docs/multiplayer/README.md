@@ -85,9 +85,9 @@ Proposed defaults are what the campaign builds against. The owner can change any
 The full design, the frozen contract, the file-ownership matrix and the dependency graph are in [work-packets.md](work-packets.md). Summary:
 
 - **Wave 0 runs four packets in parallel now.** MP-F is the only gate for code. It freezes every contract and pre-wires empty feature classes, so no later packet edits the shared wiring. MP-T (game tests), MP-B (Node baseline) and MP-H (the dedicated server + two clients + two Foremen harness) need nothing from it.
-- **Wave 1 runs 14 packets in parallel** once MP-F merges, and no Wave-1 packet waits for another:
+- **Wave 1 runs 14 packets in parallel** once MP-F merges, and no Wave-1 packet waits for another to build and test:
   - **The renderer packets** (MP-08 to MP-11) verify in singleplayer through MP-F's `dev.mp.fake` overlay, which makes your own studio render as someone else's.
-  - **The networking packets** verify on MP-H's harness against MP-F's default plot directory.
+  - **The networking packets** verify with JUnit and game tests against a fake `PlotDirectory`. Their harness checks that need an owned plot run once MP-03's registry is merged (merge MP-03 first among them), otherwise in MP-I.
   - Runtime meeting points go through MP-F contracts and are proven together in MP-I.
 - **Wave 2** is MP-I: end-to-end on the harness, a leak scan of relayed bytes and remote screenshots, and a full singleplayer QA compare against MP-F's baseline.
 - **Wave 3** is MP-Z: docs, the shipped config, the owner UAT, and the colo deploy (owner-confirmed).
