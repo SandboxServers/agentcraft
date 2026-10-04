@@ -78,12 +78,20 @@ public final class Redactor {
 
     public static @Nullable PublicEvent say(ForemanState state, Protocol.AgentSay say, PublicPolicy policy) {
         if (say.agentId() == null) return null;
-        String id = publicIds(state).get(say.agentId());
+        Map<String, String> ids = publicIds(state);
+        String id = ids.get(say.agentId());
         if (id == null) return null;
+        // The contract allows "user" or a published agent's id. The Foreman's "all" means everyone, also when
+        // an agent has that id, so it is never an addressee here. An agent whose public id comes out as one of
+        // those two words (its own id, or one that sanitizes to it) cannot be named either: a viewer would read
+        // "user" as the owner, and "all" is not an addressee.
         String to = say.to();
         String publishedTo = null;
-        if ("user".equals(to) || "all".equals(to)) publishedTo = to;
-        else if (to != null) publishedTo = publicIds(state).get(to);
+        if ("user".equals(to)) publishedTo = to;
+        else if (to != null && !"all".equals(to)) {
+            publishedTo = ids.get(to);
+            if ("all".equals(publishedTo) || "user".equals(publishedTo)) publishedTo = null;
+        }
         return new PublicEvent.Say(id, publishedTo, optIn(say.text(), 120, policy.sayText()), say.text().length());
     }
 

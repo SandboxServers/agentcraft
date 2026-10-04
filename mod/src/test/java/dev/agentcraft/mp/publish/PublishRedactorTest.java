@@ -424,13 +424,43 @@ class PublishRedactorTest {
         assertTrue(state.hasData());
     }
 
-    @Test void say_to_is_kept_only_for_user_all_or_a_published_agent() {
+    @Test void say_to_is_kept_only_for_user_or_a_published_agent() {
         ForemanState state = ForemanStates.showcase();
-        assertEquals("user", ((PublicEvent.Say) Redactor.say(state, new Protocol.AgentSay("kit", "hello", "user", 1), PublicPolicy.DEFAULT)).to());
-        assertEquals("all", ((PublicEvent.Say) Redactor.say(state, new Protocol.AgentSay("kit", "hello", "all", 1), PublicPolicy.DEFAULT)).to());
-        assertEquals("wren", ((PublicEvent.Say) Redactor.say(state, new Protocol.AgentSay("kit", "hello", "wren", 1), PublicPolicy.DEFAULT)).to());
-        assertNull(((PublicEvent.Say) Redactor.say(state, new Protocol.AgentSay("kit", "hello", "/srv/secret-path", 1), PublicPolicy.DEFAULT)).to());
+        assertEquals("user", sayTo(state, "user"));
+        assertEquals("wren", sayTo(state, "wren"));
+        assertNull(sayTo(state, "all")); // the Foreman's "everyone": the contract has no such addressee
+        assertNull(sayTo(state, "not-an-agent"));
+        assertNull(sayTo(state, "/srv/secret-path"));
         assertNull(Redactor.say(state, new Protocol.AgentSay("not-an-agent", "SECRET_SAY", "user", 1), new PublicPolicy(false, true, false, false)));
+    }
+
+    @Test void say_to_all_or_to_an_agent_past_the_cap_is_not_published_even_when_an_agent_has_the_id_all() {
+        StringBuilder agents = new StringBuilder();
+        List<String> ids = new ArrayList<>(List.of("kit", "all"));
+        for (int i = 2; i < 17; i++) ids.add("agent-%02d".formatted(i));
+        for (String id : ids) agents.append(agents.isEmpty() ? "" : ",")
+            .append("{\"id\":\"%1$s\",\"name\":\"%1$s\",\"skin\":\"%1$s\",\"state\":\"idle\",\"station\":\"desk\",\"activity\":\"\"}".formatted(id));
+        ForemanState state = ForemanStates.fromSnapshot(JsonParser.parseString("{\"agents\":[" + agents + "]}").getAsJsonObject());
+        assertEquals(ids.subList(0, 16), Redactor.redact(state, PublicPolicy.DEFAULT).agents().stream().map(PublicAgent::id).toList());
+        assertEquals("agent-15", sayTo(state, "agent-15"));
+        assertNull(sayTo(state, "agent-16")); // the 17th agent is not published
+        assertNull(sayTo(state, "all")); // "all" from the Foreman means everyone, never the agent with that id
+    }
+
+    @Test void say_to_an_agent_whose_public_id_is_a_reserved_word_is_not_published() {
+        // The published id is the sanitized one: "all§c" goes out as "all" and "user§c" as "user".
+        String agents = "";
+        for (String id : List.of("kit", "all\u00a7c", "user\u00a7c")) agents += (agents.isEmpty() ? "" : ",")
+            + "{\"id\":\"%1$s\",\"name\":\"x\",\"skin\":\"kit\",\"state\":\"idle\",\"station\":\"desk\",\"activity\":\"\"}".formatted(id);
+        ForemanState state = ForemanStates.fromSnapshot(JsonParser.parseString("{\"agents\":[" + agents + "]}").getAsJsonObject());
+        assertEquals(List.of("kit", "all", "user"), Redactor.redact(state, PublicPolicy.DEFAULT).agents().stream().map(PublicAgent::id).toList());
+        assertNull(sayTo(state, "all\u00a7c"));
+        assertNull(sayTo(state, "user\u00a7c"));
+        assertEquals("user", sayTo(state, "user")); // the Foreman's own word for the owner still goes out
+    }
+
+    private static String sayTo(ForemanState state, String to) {
+        return ((PublicEvent.Say) Redactor.say(state, new Protocol.AgentSay("kit", "hello", to, 1), PublicPolicy.DEFAULT)).to();
     }
 
     @Test void task_done_fires_only_for_a_new_done_task_with_a_published_assignee() {

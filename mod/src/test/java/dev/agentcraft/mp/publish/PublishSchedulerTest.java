@@ -223,6 +223,27 @@ class PublishSchedulerTest {
         assertFalse(harness.states.getLast().policy().sayText());
     }
 
+    @Test void say_addressee_is_sent_only_while_it_is_user_or_an_agent_in_the_state_last_sent() {
+        Harness harness = new Harness(agents("marlow", "wren", "kit"), 4);
+        for (String state : List.of("thinking", "editing", "reading", "testing")) harness.sendChanged(0, state);
+        harness.patch("idle");
+        harness.scheduler.markDirty(); // a fifth state in one second waits, and the says wait behind it
+        for (String to : List.of("user", "wren", "kit", "all")) harness.scheduler.offer(new PublicEvent.Say("marlow", to, null, 5), 0, true);
+        assertTrue(harness.events.isEmpty());
+        harness.state = agents("marlow", "wren"); // kit leaves before the held says go out
+        harness.scheduler.flush(1_000_000_000L, true);
+        assertEquals(List.of("marlow", "wren"), harness.states.getLast().agents().stream().map(agent -> agent.id()).toList());
+        assertEquals(java.util.Arrays.asList("user", "wren", null, null),
+            harness.events.stream().map(event -> ((PublicEvent.Say) event).to()).toList());
+    }
+
+    private static ForemanState agents(String... ids) {
+        StringBuilder agents = new StringBuilder();
+        for (String id : ids) agents.append(agents.isEmpty() ? "" : ",")
+            .append("{\"id\":\"%1$s\",\"name\":\"%1$s\",\"skin\":\"%1$s\",\"state\":\"idle\",\"station\":\"desk\",\"activity\":\"\"}".formatted(id));
+        return ForemanStates.fromSnapshot(com.google.gson.JsonParser.parseString("{\"agents\":[" + agents + "]}").getAsJsonObject());
+    }
+
     @Test void full_held_event_fifo_drops_newest_and_preserves_order() {
         Harness harness = new Harness(2, () -> SAY_TEXT_ON);
         var order = new ArrayList<String>();
@@ -420,7 +441,7 @@ class PublishSchedulerTest {
     private static PublicEvent say(String text) { return new PublicEvent.Say("marlow", "user", text, text.length()); }
 
     private final class Harness {
-        final ForemanState state;
+        ForemanState state; // a test may replace it: the scheduler reads it on every flush
         final List<PublicStudioState> states = new ArrayList<>();
         final List<PublicEvent> events = new ArrayList<>();
         final AtomicInteger rate;
