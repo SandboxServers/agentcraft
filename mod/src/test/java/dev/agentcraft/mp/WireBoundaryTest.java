@@ -2,6 +2,8 @@ package dev.agentcraft.mp;
 
 import static org.junit.jupiter.api.Assertions.*;
 import com.google.gson.*;
+import dev.agentcraft.client.foreman.ForemanStates;
+import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.layout.Anchor;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.net.*;
@@ -31,8 +33,10 @@ class WireBoundaryTest {
             for(int i=0;i<16;i++) {
                 var a=raw.getAsJsonArray("agents").get(0).deepCopy().getAsJsonObject();
                 // Prefix keeps identities distinct after controls/surrogates are removed.
-                a.addProperty("id",String.format("%02d",i)+fill(unit,14));
-                a.addProperty("name",fill(unit,16)); a.addProperty("skin",fill(unit,16));
+                // Ids and skins are resource paths: only a fill that sanitizing removes may ride in them.
+                String path=MpText.sanitize(unit,2).isEmpty() ? unit : "s";
+                a.addProperty("id",String.format("%02d",i)+fill(path,14));
+                a.addProperty("name",fill(unit,16)); a.addProperty("skin",fill(path,16));
                 a.addProperty("activity",fill(unit,48)); a.addProperty("paused",i%2==0); a.addProperty("awaitingUser",i%2!=0); agents.add(a);
             }
             for(int i=0;i<32;i++) {
@@ -109,17 +113,112 @@ class WireBoundaryTest {
     @Test void hello_rates_and_combined_plot_origin_are_checked_before_handling() {
         var valid=new HelloS2C(1,StudioId.LOCAL,3,new ServerInfo(256,24,7,19));
         assertEquals(valid,CodecTest.round(HelloS2C.CODEC,valid));
-        for(ServerInfo info:List.of(new ServerInfo(128,12,0,10),new ServerInfo(128,12,1001,10),new ServerInfo(128,12,4,0),new ServerInfo(128,12,4,1001),new ServerInfo(1048576,12,4,10))) {
+        for(ServerInfo info:List.of(new ServerInfo(128,12,0,10),new ServerInfo(128,12,1001,10),new ServerInfo(128,12,4,0),new ServerInfo(128,12,4,1001))) {
             var b=CodecTest.buf(); try {
                 HelloS2C.CODEC.encode(b,new HelloS2C(1,StudioId.LOCAL,Integer.MAX_VALUE,info));
                 assertThrows(RuntimeException.class,()->HelloS2C.CODEC.decode(b));
             } finally { b.release(); }
         }
+        // A plot the grid cannot place is not a decoder error, which would disconnect: the receiver refuses the hello.
+        UUID player=UUID.randomUUID(); var far=new HelloS2C(1,StudioId.of(player),Integer.MAX_VALUE,new ServerInfo(1048576,12,4,10));
+        assertThrows(IllegalArgumentException.class,()->PlotGrid.originOf(far.plotIndex(),far.serverInfo().plotStride()));
+        HelloS2C decoded=CodecTest.round(HelloS2C.CODEC,far); assertEquals(far,decoded);
+        MpMode.joined(false,"test");
+        try(var capture=MpLog.capture()) {
+            assertFalse(MpMode.receiveHello(decoded,false,player));
+            assertEquals(List.of("event=hello_received protocol=1 mode=SINGLEPLAYER"),capture.lines());
+            assertEquals(StudioId.LOCAL,Anchors.self()); assertTrue(MpMode.serverInfo().isEmpty());
+        } finally { MpMode.disconnected(); }
+    }
+    @Test void a_hello_of_another_protocol_is_skipped_whole_and_refused_as_a_mismatch() {
+        UUID player=UUID.randomUUID(); var enabled=new MpServerConfig(true,128,true,true,true,true,true,12,4,10);
+        var b=CodecTest.buf();
+        try {
+            // A later protocol's hello: fields this build does not know, in an order it cannot parse.
+            b.writeVarInt(2); b.writeUtf("a field protocol 1 does not have"); b.writeUUID(player); b.writeLong(7);
+            HelloS2C hello=HelloS2C.CODEC.decode(b); assertEquals(0,b.readableBytes()); assertEquals(2,hello.protocol());
+            MpMode.joined(false,"test");
+            try(var capture=MpLog.capture()) {
+                assertFalse(MpMode.receiveHello(hello,false,player));
+                assertEquals(List.of("event=hello_received protocol=2 mode=SINGLEPLAYER"),capture.lines());
+            }
+            assertTrue(MpMode.inactiveMessage().contains("hello rejected")); assertEquals(StudioId.LOCAL,Anchors.self());
+            b.clear(); b.writeVarInt(3);   // or shorter than this build's hello
+            assertEquals(3,HelloS2C.CODEC.decode(b).protocol());
+            b.clear(); b.writeVarInt(2); b.writeLong(7); b.writeUtf("x".repeat(40));
+            HelloC2S reply=HelloC2S.CODEC.decode(b); assertEquals(0,b.readableBytes()); assertEquals(2,reply.protocol());
+            assertFalse(MpPayloads.acceptHello(player,reply,enabled,true)); assertFalse(MpPayloads.isModEquipped(player));
+            // This build's protocol is parsed exactly as before: trailing bytes stay unread, for the game to refuse.
+            b.clear(); HelloC2S.CODEC.encode(b,new HelloC2S(MpProtocol.VERSION,"0.1.0")); b.writeByte(0);
+            assertEquals(new HelloC2S(MpProtocol.VERSION,"0.1.0"),HelloC2S.CODEC.decode(b)); assertEquals(1,b.readableBytes());
+        } finally { b.release(); MpMode.disconnected(); }
+        var same=new HelloS2C(MpProtocol.VERSION,StudioId.of(player),3,new ServerInfo(256,24,7,19)); assertEquals(same,CodecTest.round(HelloS2C.CODEC,same));
+        var reply=new HelloC2S(MpProtocol.VERSION,"0.1.0"); assertEquals(reply,CodecTest.round(HelloC2S.CODEC,reply));
+    }
+    private static org.junit.jupiter.api.function.Executable cap(String field,int cap,java.util.function.IntConsumer build) {
+        return ()->{
+            build.accept(cap);
+            var e=assertThrows(IllegalArgumentException.class,()->build.accept(cap+1),field);
+            assertTrue(e.getMessage().startsWith(field+" exceeds "+cap+" "),e.getMessage());
+        };
+    }
+    private static PublicAgent agent(String id,String name,String skin,String activity) {
+        return new PublicAgent(id,name,skin,AgentStateWire.IDLE,StationWire.DESK,true,false,false,activity);
+    }
+    private static List<String> ids(int n) { return java.util.stream.IntStream.range(0,n).mapToObj(i->"a"+i).toList(); }
+    @Test void every_cap_is_accepted_at_the_limit_and_refused_one_over_where_the_record_is_built() {
+        var s=CodecTest.state(); var all=new PublicPolicy(true,true,true,true); var task=new PublicTask("t","T",TaskStatusWire.TODO,null);
+        assertAll(
+            cap("agent id",16,n->agent("a".repeat(n),"n","s",null)),
+            cap("agent name",16,n->agent("a","n".repeat(n),"s",null)),
+            cap("agent skin",16,n->agent("a","n","s".repeat(n),null)),
+            cap("agent activity",48,n->agent("a","n","s","x".repeat(n))),
+            cap("task id",48,n->new PublicTask("t".repeat(n),"T",TaskStatusWire.TODO,null)),
+            cap("task title",80,n->new PublicTask("t","T".repeat(n),TaskStatusWire.TODO,null)),
+            cap("task assignee",16,n->new PublicTask("t","T",TaskStatusWire.TODO,"a".repeat(n))),
+            cap("goal text",120,n->new GoalSummary(GoalStatusWire.ACTIVE,0,"g".repeat(n))),
+            cap("agents",16,n->new PublicStudioState(1,true,Collections.nCopies(n,s.agents().getFirst()),s.counts(),s.goal(),s.ci(),s.policy(),null)),
+            cap("ci",8,n->new PublicStudioState(1,true,s.agents(),s.counts(),s.goal(),Collections.nCopies(n,s.ci().getFirst()),s.policy(),null)),
+            cap("tasks",32,n->new PublicStudioState(1,true,s.agents(),s.counts(),s.goal(),s.ci(),all,Collections.nCopies(n,task))),
+            cap("say agentId",16,n->new PublicEvent.Say("a".repeat(n),null,null,1)),
+            cap("say to",16,n->new PublicEvent.Say("a","a".repeat(n),null,1)),
+            cap("say text",120,n->new PublicEvent.Say("a",null,"x".repeat(n),n)),
+            cap("task_done agentId",16,n->new PublicEvent.TaskDone("a".repeat(n))),
+            cap("lamps",64,n->{ Map<String,LampStatusWire> lamps=new HashMap<>(); for(String id:ids(n)) lamps.put("agent:"+id,LampStatusWire.OFF); new WorldIntent(1,lamps,false,false,Set.of()); }),
+            cap("litMonitors",64,n->new WorldIntent(1,Map.of(),false,false,new HashSet<>(ids(n)))),
+            cap("modVersion",32,n->new HelloC2S(1,"v".repeat(n))),
+            cap("ownerName",16,n->new PresenceS2C(StudioId.LOCAL,"n".repeat(n),true)),
+            cap("layout name",48,n->new LayoutS2C(StudioId.LOCAL,0,Anchors.builder("s".repeat(n)).build())),
+            cap("anchor name",48,n->new LayoutS2C(StudioId.LOCAL,0,Anchors.builder("studio").spot("a".repeat(n),0,65,0,0).build())),
+            cap("anchors",512,n->{ var layout=Anchors.builder("studio"); for(String id:ids(n)) layout.spot(id,0,65,0,0); new LayoutS2C(StudioId.LOCAL,0,layout.build()); }));
+    }
+    @Test void agent_ids_and_skins_are_resource_paths_at_decode_and_where_the_record_is_built() {
+        // What a viewer's renderer does with a published skin: the game refuses "Wren" with an exception.
+        assertThrows(RuntimeException.class,()->dev.agentcraft.AgentCraft.id("entity/agent/Wren"));
+        for(String field:List.of("id","skin")) for(String bad:List.of("Wren","w ren","wr:en","wr\u00e9n","😀")) {
+            var raw=PublicJson.toJson(CodecTest.state()); raw.getAsJsonArray("agents").get(0).getAsJsonObject().addProperty(field,bad);
+            assertEquals("agent "+field+" is not a resource path",assertThrows(IllegalArgumentException.class,()->PublicJson.fromJson(raw)).getMessage());
+            assertThrows(RuntimeException.class,()->decodeState(raw.toString()));
+            assertThrows(IllegalArgumentException.class,()->agent(field.equals("id") ? bad : "a","n",field.equals("skin") ? bad : "s",null));
+        }
+        String every="az_09-./x"; assertEquals(every,agent(every,"n",every,null).skin());
+        assertEquals("entity/agent/"+every,dev.agentcraft.AgentCraft.id("entity/agent/"+every).getPath());
+        // A skin is sanitized before it is checked, so what decoded before decodes to the same record.
+        var raw=PublicJson.toJson(CodecTest.state()); raw.getAsJsonArray("agents").get(0).getAsJsonObject().addProperty("skin","\u00a7awr\nen");
+        assertEquals("wren",PublicJson.fromJson(raw).agents().getFirst().skin());
+        // Every agent of the Foreman fixtures is still publishable and still decodes.
+        for(var foreman:List.of(ForemanStates.showcase(),ForemanStates.showcaseLate())) {
+            List<PublicAgent> agents=foreman.agents().values().stream().map(a->agent(a.id(),a.name(),a.skin(),null)).toList();
+            var s=CodecTest.state(); var state=new PublicStudioState(1,true,agents,s.counts(),s.goal(),s.ci(),s.policy(),null);
+            assertEquals(6,agents.size()); assertEquals(state,decodeState(PublicJson.toJson(state).toString()));
+        }
     }
     @Test void outbound_state_refuses_opted_out_text_and_overlength_fields_before_writing() {
         var s=CodecTest.state();
         assertThrows(IllegalArgumentException.class,()->new PublicStudioState(1,true,s.agents(),s.counts(),new GoalSummary(GoalStatusWire.ACTIVE,0,"private"),s.ci(),PublicPolicy.DEFAULT,null));
-        var invalid=new PublicStudioState(1,true,List.of(new PublicAgent("a".repeat(17),"name","skin",AgentStateWire.EDITING,StationWire.DESK,true,false,false,null)),s.counts(),s.goal(),s.ci(),s.policy(),null);
+        assertThrows(IllegalArgumentException.class,()->new PublicAgent("a".repeat(17),"name","skin",AgentStateWire.EDITING,StationWire.DESK,true,false,false,null));
+        // What a record still allows and the wire does not is refused by the encoder before a byte is written.
+        var invalid=new PublicStudioState(-1,true,s.agents(),s.counts(),s.goal(),s.ci(),s.policy(),null);
         var b=CodecTest.buf(); try { assertThrows(IllegalArgumentException.class,()->PublicStateC2S.CODEC.encode(b,new PublicStateC2S(invalid))); assertEquals(0,b.writerIndex()); } finally { b.release(); }
         try(var capture=MpLog.capture()) {
             assertThrows(RuntimeException.class,()->decodeState("{\"private\":true}"));
