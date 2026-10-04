@@ -117,4 +117,19 @@ class FoundationTest {
             assertEquals(List.of("event=studio_event_rejected reason=unknown_agent"),capture.lines());
         }
     }
+    @Test void telemetry_values_neutralise_unicode_separators_and_format_controls() {
+        // NEL, line and paragraph separators, then format controls: soft hyphen, zero-width space, bidi override and isolate, BOM, a supplementary tag.
+        List<String> leaked=new ArrayList<>();
+        for(int cp:List.of(0x85,0x2028,0x2029,0xAD,0x200B,0x202E,0x2066,0xFEFF,0xE0001)) {
+            try(var capture=MpLog.capture()) {
+                MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,"reason","a"+Character.toString(cp)+"b");
+                if(!capture.lines().equals(List.of("event=studio_event_rejected reason=a_b"))) leaked.add("U+"+Integer.toHexString(cp).toUpperCase());
+            }
+        }
+        assertEquals(List.of(),leaked);
+        try(var capture=MpLog.capture()) {
+            MpLog.event(MpEvents.STUDIO_EVENT_REJECTED,"reason","config/agentcraft-server.json","count",-1,"studio",new UUID(1,2));
+            assertEquals(List.of("event=studio_event_rejected reason=config/agentcraft-server.json count=-1 studio=00000000-0000-0001-0000-000000000002"),capture.lines());
+        }
+    }
 }
