@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -36,6 +37,8 @@ import net.minecraft.world.phys.AABB;
  */
 public final class PlotStore {
     static final int MAX_BYTES = 1_048_576;
+    /** How many rejected rows or off-grid plots a start refusal names before "and N more". */
+    static final int MAX_NAMED = 8;
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
     private PlotStore() {}
@@ -43,9 +46,21 @@ public final class PlotStore {
     /** Why the whole registry file could not be used. A missing file is {@code NONE}: an empty registry. */
     public enum Problem { NONE, UNREADABLE, OVERSIZED, BAD_SHAPE }
 
-    public record Loaded(List<Plot> plots, Problem problem, int skipped) {
+    /** Why one row was rejected: the first check it failed, in this order. A fixed set, safe to log. */
+    public enum Reason { INVALID, DUPLICATE_INDEX, DUPLICATE_OWNER, OVERLAP }
+
+    /** A rejected row: its zero-based position in the {@code plots} array and why. Nothing from the row itself. */
+    public record Rejected(int row, Reason reason) {}
+
+    public record Loaded(List<Plot> plots, Problem problem, List<Rejected> rejected) {
         public Loaded {
             plots = List.copyOf(plots);
+            rejected = List.copyOf(rejected);
+        }
+
+        /** How many rows were rejected. */
+        public int skipped() {
+            return rejected.size();
         }
 
         public boolean failed() {
@@ -87,28 +102,32 @@ public final class PlotStore {
         Path file = plotsFile(worldRoot);
         // Only a file that is known to be absent is an empty registry. One whose existence cannot be
         // determined falls through to the read below and fails there.
-        if (Files.notExists(file)) return new Loaded(List.of(), Problem.NONE, 0);
+        if (Files.notExists(file)) return new Loaded(List.of(), Problem.NONE, List.of());
         try {
-            if (Files.size(file) > MAX_BYTES) return new Loaded(List.of(), Problem.OVERSIZED, 0);
+            if (Files.size(file) > MAX_BYTES) return new Loaded(List.of(), Problem.OVERSIZED, List.of());
             JsonElement root = JsonParser.parseString(Files.readString(file, StandardCharsets.UTF_8));
-            if (!root.isJsonObject()) return new Loaded(List.of(), Problem.BAD_SHAPE, 0);
+            if (!root.isJsonObject()) return new Loaded(List.of(), Problem.BAD_SHAPE, List.of());
             JsonElement plots = root.getAsJsonObject().get("plots");
-            if (plots == null || !plots.isJsonArray()) return new Loaded(List.of(), Problem.BAD_SHAPE, 0);
+            if (plots == null || !plots.isJsonArray()) return new Loaded(List.of(), Problem.BAD_SHAPE, List.of());
             List<Plot> loaded = new ArrayList<>();
             List<AABB> boxes = new ArrayList<>();
             Set<Integer> indexes = new HashSet<>();
             Set<UUID> owners = new HashSet<>();
-            int skipped = 0;
-            for (JsonElement element : plots.getAsJsonArray()) {
-                Plot plot = plotFrom(element);
+            List<Rejected> rejected = new ArrayList<>();
+            JsonArray rows = plots.getAsJsonArray();
+            for (int row = 0; row < rows.size(); row++) {
+                Plot plot = plotFrom(rows.get(row));
                 AABB box = plot == null ? null : plot.box();
                 // Every check runs before anything is recorded: a rejected row must not reserve its
                 // index, owner or ground and reject the valid rows that follow it. Two stored origins
                 // on the same ground would let two owners rebuild the same blocks, so the first row
                 // wins there too, with the same box test an allocation uses.
-                if (plot == null || indexes.contains(plot.index()) || owners.contains(plot.owner().owner())
-                    || overlaps(boxes, box)) {
-                    skipped++;
+                Reason reason = plot == null ? Reason.INVALID
+                    : indexes.contains(plot.index()) ? Reason.DUPLICATE_INDEX
+                    : owners.contains(plot.owner().owner()) ? Reason.DUPLICATE_OWNER
+                    : overlaps(boxes, box) ? Reason.OVERLAP : null;
+                if (reason != null) {
+                    rejected.add(new Rejected(row, reason));
                     continue;
                 }
                 indexes.add(plot.index());
@@ -116,9 +135,9 @@ public final class PlotStore {
                 boxes.add(box);
                 loaded.add(plot);
             }
-            return new Loaded(loaded, Problem.NONE, skipped);
+            return new Loaded(loaded, Problem.NONE, rejected);
         } catch (IOException | RuntimeException e) {
-            return new Loaded(List.of(), Problem.UNREADABLE, 0);
+            return new Loaded(List.of(), Problem.UNREADABLE, List.of());
         }
     }
 
@@ -126,7 +145,9 @@ public final class PlotStore {
      * Why an enabled server must not start on {@code loaded}, or empty when it may. The next save
      * would drop a rejected row and hand its index to a new player on top of the old build, and a
      * client places a plot at {@code PlotGrid.originOf(index, stride)}, so one rejected row or one
-     * origin off that grid refuses the whole file. Counts only: no file content and no owner.
+     * origin off that grid refuses the whole file. The reason names rejected rows by their zero-based
+     * position and a {@link Reason}, and off-grid plots by their index: ints and fixed words only, so
+     * it carries no owner and no text from the file. At most {@link #MAX_NAMED} of either are named.
      */
     public static Optional<String> startRefusal(Loaded loaded, int stride) {
         String whole = switch (loaded.problem()) {
@@ -138,15 +159,27 @@ public final class PlotStore {
         if (whole != null) return Optional.of(whole + "; no row was loaded");
         int rows = loaded.plots().size() + loaded.skipped();
         if (loaded.skipped() > 0) {
-            return Optional.of(loaded.skipped() + " of " + rows + " rows in plots.json were rejected (invalid, duplicate or overlapping)");
+            List<String> names = new ArrayList<>();
+            for (Rejected r : loaded.rejected()) {
+                names.add("row " + r.row() + " (" + r.reason().name().toLowerCase(Locale.ROOT) + ")");
+            }
+            return Optional.of(loaded.skipped() + " of " + rows + " rows in plots.json were rejected: "
+                + firstOf(names) + "; rows are counted from 0");
         }
-        int moved = 0;
+        List<String> names = new ArrayList<>();
         for (Plot plot : loaded.plots()) {
-            if (!onGrid(plot, stride)) moved++;
+            if (!onGrid(plot, stride)) names.add("plot " + plot.index());
         }
-        if (moved == 0) return Optional.empty();
-        return Optional.of(moved + " of " + rows + " plots are not where plotStride " + stride + " puts their index:"
-            + " plots.json was written with another plotStride; restore the old value or move the plots");
+        if (names.isEmpty()) return Optional.empty();
+        return Optional.of(names.size() + " of " + rows + " plots are not where plotStride " + stride + " puts their index ("
+            + firstOf(names) + "): plots.json was written with another plotStride; restore the old value or move the plots");
+    }
+
+    /** The first {@link #MAX_NAMED} of {@code names}, then "and N more" for the rest. */
+    private static String firstOf(List<String> names) {
+        int shown = Math.min(names.size(), MAX_NAMED);
+        String text = String.join(", ", names.subList(0, shown));
+        return shown == names.size() ? text : text + " and " + (names.size() - shown) + " more";
     }
 
     private static boolean onGrid(Plot plot, int stride) {
