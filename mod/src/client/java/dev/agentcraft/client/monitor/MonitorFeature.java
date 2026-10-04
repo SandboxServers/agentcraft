@@ -57,6 +57,7 @@ public final class MonitorFeature {
 	}
 
 	public static void init() {
+		StudioDisplays.init();
 		BlockEntityRenderers.register(ModBlockEntities.MONITOR, ctx -> new MonitorRenderer());
 		Foreman.addListener(new ForemanListener() {
 			@Override
@@ -123,6 +124,7 @@ public final class MonitorFeature {
 					j.addProperty("size", m.panelW + "x" + m.panelH);
 					j.addProperty("ppb", m.ppb);
 					j.addProperty("rows", m.rows.size());
+					j.addProperty("source", m.remoteView == null ? "own" : "remote");
 					j.addProperty("ageMs", (System.nanoTime() - m.lastUsedNanos) / 1_000_000L);
 					arr.add(j);
 				}
@@ -163,13 +165,13 @@ public final class MonitorFeature {
 
 	/**
 	 * The agent a monitor shows: its binding, else the agent whose {@code monitor_<id>} anchor lies
-	 * on this panel, else "feed" (the team activity feed).
+	 * on this panel, else "feed" (the team activity feed). The own path passes {@link Anchors#current()};
+	 * a remote panel passes its studio's layout.
 	 */
-	static String resolveAgent(MonitorBlockEntity be, String binding, Direction facing, int w, int h) {
+	static String resolveAgent(MonitorBlockEntity be, String binding, Anchors.Layout layout, Direction facing, int w, int h) {
 		if (!binding.isEmpty()) {
 			return binding;
 		}
-		Anchors.Layout layout = Anchors.current();
 		if (layout.revision() != resolvedLayoutRevision || !layout.name().equals(resolvedLayoutName)) {
 			RESOLVED.clear();
 			resolvedLayoutRevision = layout.revision();
