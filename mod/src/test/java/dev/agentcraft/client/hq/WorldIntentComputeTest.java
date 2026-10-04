@@ -13,6 +13,7 @@ import dev.agentcraft.mp.state.LampStatusWire;
 import dev.agentcraft.mp.state.PublicJson;
 import dev.agentcraft.mp.state.WorldIntent;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.*;
@@ -71,6 +72,46 @@ class WorldIntentComputeTest {
 		WorldIntent intent = assertDoesNotThrow(() -> HqWorldDriver.compute(st, Anchors.Layout.EMPTY));
 		assertFalse(intent.litMonitors().contains(longId), "a 17-char id must not reach litMonitors");
 		assertFalse(intent.lamps().containsKey("agent:" + longId), "a 17-char id must not reach lamps");
+	}
+
+	@Test
+	void aHundredActiveAgentsStayInsideTheWireCaps() {
+		ForemanState st = ForemanStates.showcase();
+		for (int i = 100; i < 200; i++) {
+			JsonObject agent = new JsonObject();
+			agent.addProperty("id", "bulk" + i);
+			agent.addProperty("name", "Bulk " + i);
+			agent.addProperty("state", "idle");
+			agent.addProperty("active", true);
+			JsonObject msg = new JsonObject();
+			msg.addProperty("v", 1);
+			msg.addProperty("type", "agent.upsert");
+			msg.add("agent", agent);
+			assertTrue(st.inject("agent.upsert", msg), "agent bulk" + i + " should be accepted into the state");
+		}
+
+		WorldIntent intent = assertDoesNotThrow(() -> HqWorldDriver.compute(st, Anchors.Layout.EMPTY));
+		assertEquals(64, intent.lamps().size(), "the lamps fill the wire cap and stop there");
+		assertEquals(64, intent.litMonitors().size(), "the lit monitors fill the wire cap and stop there");
+		for (String fixed : List.of("goal", "goal:atrium", "decisions", "merge", "beacon")) {
+			assertTrue(intent.lamps().containsKey(fixed), "fixed key '" + fixed + "' must survive the cap");
+		}
+		int ci = Math.min(st.repos().size(), 8);
+		assertTrue(ci > 0, "the fixture has a repo");
+		for (int n = 1; n <= ci; n++) {
+			assertTrue(intent.lamps().containsKey("ci:#" + n), "ci:#" + n + " must survive the cap");
+		}
+		// Agent lamps follow the Foreman's order until the cap is reached; the rest have no entry.
+		int room = 64 - 5 - ci;
+		int seen = 0;
+		for (String id : st.agents().keySet()) {
+			assertEquals(seen++ < room, intent.lamps().containsKey("agent:" + id), "lamp of agent " + id);
+		}
+		assertTrue(intent.lamps().containsKey("agent:bulk100"), "the first injected agent keeps its lamp");
+		assertFalse(intent.lamps().containsKey("agent:bulk199"), "the last injected agent has no lamp");
+		assertTrue(intent.litMonitors().contains("bulk100"), "the first injected agent keeps its monitor");
+		assertFalse(intent.litMonitors().contains("bulk199"), "the last injected agent has no lit monitor");
+		assertEquals(intent, PublicJson.intentFromJson(PublicJson.toJson(intent)), "the codec accepts it");
 	}
 
 	@Test
