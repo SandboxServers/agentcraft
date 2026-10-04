@@ -1,7 +1,7 @@
 # Multiplayer: Session Resume
 
 > Type: how-to. Audience: the next coordinator session and the owner.
-> Updated: 2026-10-04 (Wave 0 in review; Wave 1 written, reviewed and on `mp/integration`). Companions: [README](../README.md), [work packets](../work-packets.md), [audit](../audit.md), [deploy runbook](../deploy.md).
+> Updated: 2026-10-04 (Wave 0 in review; Wave 1 written, reviewed, on `mp/integration` and open as pull requests #6 to #19). Companions: [README](../README.md), [work packets](../work-packets.md), [audit](../audit.md), [deploy runbook](../deploy.md).
 
 ## State: Wave 0 in review, Wave 1 written and reviewed
 
@@ -16,26 +16,47 @@ MP-00 (the spike and the plan) and the pull-request CI are on `main`. The four W
 
 After #2 merges, update the other three from `main` so their CI runs go green.
 
-**Wave 1 is written.** All fourteen Wave 1 packets are branches on the fork, and `mp/integration` contains all of them. `mp/integration` is `main` plus the four Wave 0 branches plus the Wave 1 branches, each merged with its own merge commit; it is a place to build and test everything together, never a branch to merge. At `fc06bbc` it builds with 238 JUnit tests and 102 game tests passing. No Wave 1 branch has a pull request yet: open them once Wave 0 is on `main`.
+**Wave 1 is written.** All fourteen Wave 1 packets are branches on the fork, and `mp/integration` contains all of them. `mp/integration` is `main` plus the four Wave 0 branches plus the Wave 1 branches, each merged with its own merge commit; it is a place to build and test everything together, never a branch to merge. At `fc06bbc` it builds with 238 JUnit tests and 102 game tests passing. Each Wave 1 branch is an open pull request against `main` (#6 to #19) with the owner requested as reviewer. Each is stacked on the four Wave 0 pull requests, so its diff also shows their changes until they merge; every description links the comparison from the Wave 0 base, which is the packet's own change.
 
 What "reviewed and verified" means for every packet in the table: a worker model wrote it inside a sandbox; the coordinator read every hunk against the packet's Decisions and its row of the file-ownership matrix; a second model reviewed it (an independent security review for the packets marked **(sec)**); the findings went back to a writer as one numbered brief, were fixed and were reviewed again; the last small findings were corrected by the coordinator, and for the security packets the security reviewer then confirmed the final state; and the coordinator ran `gradlew test --rerun --no-build-cache` and `gradlew build` (JUnit and the game tests) on the result. The first lines of each worknote give its status and name what is still owed.
 
-| Packet | Branch | JUnit / game tests | Still owed |
+| Packet | PR | Branch | JUnit / game tests | Still owed |
+|---|---|---|---|---|
+| MP-01 Server mode and world rules | #6 | `mp/MP-01-server-mode` | 49 / 6 | Nothing new: its live dedicated-server checks were seen when it was reviewed |
+| MP-02 Build at an offset | #7 | `mp/MP-02-offset-build` | 46 / 11 | A build on a second plot of a live server (MP-I) |
+| MP-03 Plots: registry, lifecycle, commands **(sec)** | #8 | `mp/MP-03-plots` | 63 / 28 | The live dedicated-server checks in its worknote (a join allocates and builds, the commands, a restart keeps the plots) |
+| MP-04 Layout sync | #9 | `mp/MP-04-layout-sync` | 54 / 2 | The two-client check |
+| MP-05 Public-state publisher and redaction **(sec)** | #10 | `mp/MP-05-publisher` | 90 / 2 | The live checks in its worknote; the leak scan of relayed bytes is MP-I's |
+| MP-06 Relay and presence **(sec)** | #11 | `mp/MP-06-relay` | 94 / 4 | The two-client harness checks in its worknote |
+| MP-07 World intents **(sec)** | #12 | `mp/MP-07-world-intents` | 70 / 10 | The harness checks in its worknote (a remote studio's lamps follow its owner's Foreman) |
+| MP-08 Multi-studio agents | #13 | `mp/MP-08-multi-studio-agents` | 54 / 2 | The two-client look; the plate-layout timing figure and the speech-bubble look were not examined |
+| MP-09 Studio-aware displays | #14 | `mp/MP-09-displays` | 60 / 2 | The two-client look (a real remote studio instead of the overlay) |
+| MP-10 Studio-aware stations | #15 | `mp/MP-10-stations` | 53 / 2 | The two-client look |
+| MP-11 Visitor interactions | #16 | `mp/MP-11-visitors` | 52 / 2 | The two-client checks in its worknote |
+| MP-12 DevBridge in multiplayer | #17 | `mp/MP-12-dev-tools` | 55 / 2 | The harness checks in its worknote (remote camera, remote command, `dev.mp.send` on a real server) |
+| MP-13 Plot protection **(sec)** | #18 | `mp/MP-13-plot-protection` | 50 / 53 | The live protection checks with two players; the owner's decision on the known limits in its worknote |
+| MP-14 Deployment for multiplayer | #19 | `mp/MP-14-deploy` | 46 / 2 | A release-workflow run with the new smoke assertions (the owner starts it) |
+
+**The review record.** Findings are counted per pass: the first review, then each re-review after a fix round. "Coordinator" is the coordinating session, which read every hunk of every packet; the security reviewer and the second model are different models from the writer and from each other.
+
+| Packet | Written by | Reviewed by | Findings per pass |
 |---|---|---|---|
-| MP-01 Server mode and world rules | `mp/MP-01-server-mode` | 49 / 6 | Nothing new: its live dedicated-server checks were seen when it was reviewed |
-| MP-02 Build at an offset | `mp/MP-02-offset-build` | 46 / 11 | A build on a second plot of a live server (MP-I) |
-| MP-03 Plots: registry, lifecycle, commands **(sec)** | `mp/MP-03-plots` | 63 / 28 | The live dedicated-server checks in its worknote (a join allocates and builds, the commands, a restart keeps the plots) |
-| MP-04 Layout sync | `mp/MP-04-layout-sync` | 54 / 2 | The two-client check |
-| MP-05 Public-state publisher and redaction **(sec)** | `mp/MP-05-publisher` | 90 / 2 | The live checks in its worknote; the leak scan of relayed bytes is MP-I's |
-| MP-06 Relay and presence **(sec)** | `mp/MP-06-relay` | 94 / 4 | The two-client harness checks in its worknote |
-| MP-07 World intents **(sec)** | `mp/MP-07-world-intents` | 70 / 10 | The harness checks in its worknote (a remote studio's lamps follow its owner's Foreman) |
-| MP-08 Multi-studio agents | `mp/MP-08-multi-studio-agents` | 54 / 2 | The two-client look; the plate-layout timing figure and the speech-bubble look were not examined |
-| MP-09 Studio-aware displays | `mp/MP-09-displays` | 60 / 2 | The two-client look (a real remote studio instead of the overlay) |
-| MP-10 Studio-aware stations | `mp/MP-10-stations` | 53 / 2 | The two-client look |
-| MP-11 Visitor interactions | `mp/MP-11-visitors` | 52 / 2 | The two-client checks in its worknote |
-| MP-12 DevBridge in multiplayer | `mp/MP-12-dev-tools` | 55 / 2 | The harness checks in its worknote (remote camera, remote command, `dev.mp.send` on a real server) |
-| MP-13 Plot protection **(sec)** | `mp/MP-13-plot-protection` | 50 / 53 | The live protection checks with two players; the owner's decision on the known limits in its worknote |
-| MP-14 Deployment for multiplayer | `mp/MP-14-deploy` | 46 / 2 | A release-workflow run with the new smoke assertions (the owner starts it) |
+| MP-01 | deepseek-v4.1-flash | coordinator | reviewed before this wave's main run (two corrections) |
+| MP-02 | Cursor Composer | coordinator | reviewed before this wave's main run (one fix round) |
+| MP-03 **(sec)** | Cursor Grok; fix rounds deepseek-v4.1-flash | security reviewer (Codex) four times, coordinator | 11, 8, 2, 0 (one declined: the frozen catalog) |
+| MP-04 | Cursor Composer | coordinator | reviewed before this wave's main run (one fix round) |
+| MP-05 **(sec)** | Cursor Grok; fix round gpt-6-luna | security reviewer (Codex) three times, coordinator | 6, 2, 0 |
+| MP-06 **(sec)** | deepseek-v4-pro; fix rounds deepseek-v4.1-flash | security reviewer (Codex) four times, coordinator | 13, 5, 2, 0 |
+| MP-07 **(sec)** | deepseek-v4-pro; fix rounds deepseek-v4.1-flash | security reviewer (Codex) four times, coordinator | 13, 10, 2 and one by the coordinator, 0 |
+| MP-08 | gpt-6-luna; fix rounds deepseek-v4.1-flash | coordinator, then a second model (Claude) | 4, 5 |
+| MP-09 | deepseek-v4.1-flash | coordinator, then a second model (Claude) | 4, 5 |
+| MP-10 | deepseek-v4.1-flash | coordinator, then a second model (Claude) | 2, 2 |
+| MP-11 | deepseek-v4.1-flash | coordinator, then a second model (Claude) | 3, 3 |
+| MP-12 | deepseek-v4.1-flash, finished by mimo-v2.6-flash | a second model (Claude) twice, coordinator | 7, 6 |
+| MP-13 **(sec)** | deepseek-v4-pro; fix rounds deepseek-v4.1-flash | security reviewer (Codex) four times, a second model's progress check, coordinator | 12, 5, 2 and one by the coordinator, 3, 0 |
+| MP-14 | deepseek-v4.1-flash | coordinator, then a second model (Claude) | 3, 5 |
+
+Two things about that record that a reader should know. Every fix round ran on one inexpensive model, because the worker pool's usage limit is counted in money and the dearer models used it up within minutes; so the plan to spread the writing over several models held only for the first versions. And the reviews of the packets that are not marked **(sec)** were done by the coordinator and a second Claude model instead of by a worker model in the sandbox, for the same reason.
 
 **What has been seen in a game window, and what has not.** Seen, in a singleplayer dev client on `mp/integration`:
 
@@ -74,7 +95,7 @@ Not seen by anyone, and still owed before any of this is called done: **every ch
 
 ## Picking up after Wave 1
 
-- **Pull requests.** Once the four Wave 0 pull requests are on `main`, open one pull request per Wave 1 branch with the owner requested as reviewer. Each branch started from the Wave 0 integration base, so merge `main` into it first.
+- **Pull requests.** #6 to #19 are open, one per Wave 1 branch, with the owner requested as reviewer. Each branch started from the Wave 0 integration base: once the four Wave 0 pull requests are on `main`, merge `main` into each Wave 1 branch so that its diff shows only the packet and its CI run is current.
 - **Order of merging into `main`.** MP-02 before MP-03. MP-03 before the other networking packets, because their harness checks need an owned plot. MP-14 after MP-01 and MP-03. Everything else is independent.
 - **Where MP-02 and MP-03 meet**, `HqFeature.buildAndPublish` must call `PlanStore.invalidateUnless(server, options.studio(), builder.id())`, so that a player's own plan file is the one invalidated. MP-03 was written before that method existed. The merge commit "Integrate mp/MP-03-plots" on `mp/integration` carries that line; the same change is needed when the two reach `main`.
 - **MP-I is next** (it has not started): the harness end to end, the leak scan of relayed bytes and remote screenshots, the full singleplayer QA compare, and every check the table above lists as owed.

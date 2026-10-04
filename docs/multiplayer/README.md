@@ -53,6 +53,13 @@ Proposed defaults are what the campaign builds against. The owner can change any
 2. Confirm D-MP05: should visitors be able to build anywhere, or only outside plots?
 3. Who is on the first whitelist? The colo already runs today's server (as a preview; remote players' agents don't render correctly until the campaign lands, A-13). Players also need the edge to forward TCP 25565 (A-53).
 4. Should the cast's `upstream-sync-steward` open a conversation with upstream about contributing multiplayer later (D-MP04)?
+5. Confirm or change what MP-13 (#18) decided under D-MP05, and rule on its known limits:
+   - with an empty hand a visitor may use only doors, trapdoors, fence gates, buttons and levers inside a plot;
+   - protection covers the plot plus a margin of one block, because beds, doors and attached blocks reach across the edge;
+   - a visitor holding any item cannot open a door inside a plot;
+   - structures completed from outside the margin that need blocks the owner placed across the edge (a nether portal, a golem or wither pattern) are left open; the eye of ender is closed;
+   - not covered at all: water, lava and fire coming in from outside, a visitor's projectiles (closing that needs a second mixin, which the packet was not allowed), trampling.
+6. Two telemetry catalog points for the next edit of work-packets.md: `studio_event_rejected` should gain the reason `bad_version` (MP-06, #11, already emits it), and `plot_command` keeps its fields, so a refused command carries no `reason` (MP-03, #8).
 
 ## Packet status
 
@@ -63,20 +70,20 @@ Proposed defaults are what the campaign builds against. The owner can change any
 | MP-T Game tests | Review | 0 | #1 | [MP-T](worknotes/MP-T.md) |
 | MP-B Baseline (Node ≥ 22.18) | Review | 0 | #2 | [MP-B](worknotes/MP-B.md) |
 | MP-H Two-client harness | Review | 0 | #4 | [MP-H](worknotes/MP-H.md) |
-| MP-01 Server mode and world rules | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-01-server-mode` | on the branch |
-| MP-02 Build at an offset | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-02-offset-build` | on the branch |
-| MP-03 Plots: registry, lifecycle, commands | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-03-plots` | on the branch |
-| MP-04 Layout sync | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-04-layout-sync` | on the branch |
-| MP-05 Public-state publisher and redaction | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-05-publisher` | on the branch |
-| MP-06 Relay and presence | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-06-relay` | on the branch |
-| MP-07 World intents | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-07-world-intents` | on the branch |
-| MP-08 Multi-studio agents | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-08-multi-studio-agents` | on the branch |
-| MP-09 Studio-aware displays | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-09-displays` | on the branch |
-| MP-10 Studio-aware stations | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-10-stations` | on the branch |
-| MP-11 Visitor interactions | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-11-visitors` | on the branch |
-| MP-12 DevBridge in multiplayer | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-12-dev-tools` | on the branch |
-| MP-13 Plot protection | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-13-plot-protection` | on the branch |
-| MP-14 Deployment for multiplayer | Review (reviewed and verified, in `mp/integration`, no PR yet) | 1 | branch `mp/MP-14-deploy` | on the branch |
+| MP-01 Server mode and world rules | Review (reviewed and verified, in `mp/integration`) | 1 | #6 | on the branch `mp/MP-01-server-mode` |
+| MP-02 Build at an offset | Review (reviewed and verified, in `mp/integration`) | 1 | #7 | on the branch `mp/MP-02-offset-build` |
+| MP-03 Plots: registry, lifecycle, commands | Review (reviewed and verified, in `mp/integration`) | 1 | #8 | on the branch `mp/MP-03-plots` |
+| MP-04 Layout sync | Review (reviewed and verified, in `mp/integration`) | 1 | #9 | on the branch `mp/MP-04-layout-sync` |
+| MP-05 Public-state publisher and redaction | Review (reviewed and verified, in `mp/integration`) | 1 | #10 | on the branch `mp/MP-05-publisher` |
+| MP-06 Relay and presence | Review (reviewed and verified, in `mp/integration`) | 1 | #11 | on the branch `mp/MP-06-relay` |
+| MP-07 World intents | Review (reviewed and verified, in `mp/integration`) | 1 | #12 | on the branch `mp/MP-07-world-intents` |
+| MP-08 Multi-studio agents | Review (reviewed and verified, in `mp/integration`) | 1 | #13 | on the branch `mp/MP-08-multi-studio-agents` |
+| MP-09 Studio-aware displays | Review (reviewed and verified, in `mp/integration`) | 1 | #14 | on the branch `mp/MP-09-displays` |
+| MP-10 Studio-aware stations | Review (reviewed and verified, in `mp/integration`) | 1 | #15 | on the branch `mp/MP-10-stations` |
+| MP-11 Visitor interactions | Review (reviewed and verified, in `mp/integration`) | 1 | #16 | on the branch `mp/MP-11-visitors` |
+| MP-12 DevBridge in multiplayer | Review (reviewed and verified, in `mp/integration`) | 1 | #17 | on the branch `mp/MP-12-dev-tools` |
+| MP-13 Plot protection | Review (reviewed and verified, in `mp/integration`) | 1 | #18 | on the branch `mp/MP-13-plot-protection` |
+| MP-14 Deployment for multiplayer | Review (reviewed and verified, in `mp/integration`) | 1 | #19 | on the branch `mp/MP-14-deploy` |
 | MP-I Integration | Not started (Wave 1 is on `mp/integration`; it starts when the owner says so) | 2 | | |
 | MP-Z Close-out, UAT, colo deploy | BlockedDependency (MP-I) | 3 | | |
 
