@@ -31,7 +31,7 @@ Changes from the handoff's sequence, and why:
 
   Always pass `--home <worktree>/.agentcraft-home --profile mp-<n>`. Never use `~/.agentcraft` or the default ports 7878/7879/25565.
 - **The coordinator is the single writer of `README.md` and this file.** A packet writes only its own `worknotes/MP-xx.md`. A packet that needs a contract change (a new payload field, a renamed method, a file not in its row) raises it with the coordinator instead of editing the contract locally.
-- **Merge train:** PRs on `SandboxServers/agentcraft` (`origin`), into `main`, in dependency order. Whoever merges second rebases onto whoever merged first, for any two packets that share a file (see the matrix). Never push to `upstream`.
+- **Merge train:** PRs on `SandboxServers/agentcraft` (`origin`), into `main`, in dependency order. Whoever merges second rebases onto whoever merged first, for any two packets that share a file (see the matrix). Every PR, drafts included, requests a review from the fork's owner (`Cadacious`). Never push to `upstream`.
 - **Definition of done, every packet:**
   1. `gradlew build` is green, including the JUnit tests from MP-F and the game tests from MP-T where present.
   2. `npm run check` is green in `foreman/` and `npm test` in `tools/` if the packet touched them, on Node ≥ 22.18 (A-05).
