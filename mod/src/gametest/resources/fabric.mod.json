@@ -3,10 +3,11 @@
 	"id": "agentcraft-gametest",
 	"version": "1.0.0",
 	"name": "AgentCraft Game Tests",
+	"description": "Test-only mod. Do not list test classes here: processGametestResources (mod/build.gradle) fills the fabric-gametest entrypoints with every class under src/gametest/java that contains @GameTest.",
 	"environment": "*",
 	"entrypoints": {
 		"fabric-gametest": [
-			"dev.agentcraft.gametest.HqSmokeGameTest"
+			"${gameTestClasses}"
 		]
 	},
 	"depends": {

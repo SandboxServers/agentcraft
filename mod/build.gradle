@@ -61,6 +61,24 @@ tasks.matching { it.name == "runGameTest" }.configureEach {
 	dependsOn(cleanGameTestRunDir)
 	timeout = java.time.Duration.ofMinutes(5)
 }
+// Fabric runs only the classes listed under the `fabric-gametest` entrypoint. Fill that list from the
+// sources, so a new class with @GameTest methods is picked up without editing a shared file.
+def gameTestSources = fileTree("src/gametest/java") { include "**/*.java"; exclude "**/package-info.java" }
+tasks.named("processGametestResources") {
+	inputs.files(gameTestSources).withPropertyName("gameTestSources").withPathSensitivity(PathSensitivity.RELATIVE)
+	filesMatching("fabric.mod.json") {
+		def classes = []
+		gameTestSources.visit {
+			if (!it.directory && it.file.getText("UTF-8") =~ /@(?:[\w.]+\.)?GameTest\b/) {
+				classes << it.relativePath.pathString.replaceFirst(/\.java$/, "").replace("/", ".")
+			}
+		}
+		if (classes.empty) {
+			throw new GradleException("No class under src/gametest/java contains @GameTest")
+		}
+		expand(gameTestClasses: classes.sort().join('", "'))
+	}
+}
 
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
