@@ -12,12 +12,14 @@ import dev.agentcraft.client.mp.Studios;
 import dev.agentcraft.layout.Anchors;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
+import dev.agentcraft.mp.Plot;
 import dev.agentcraft.mp.net.PublicStateC2S;
 import dev.agentcraft.mp.net.StudioEventC2S;
 import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicPolicy;
 import dev.agentcraft.mp.state.PublicStudioState;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -170,7 +172,8 @@ public final class PublishFeature {
         return player.getUUID();
     }
 
-    private static int plot() { return Studios.plot(Anchors.self()).map(p -> p.index()).orElse(-1); }
+    /** The own plot as the hello and the layout sync registered it; the scheduler resends when it changes. */
+    private static Optional<Plot> plot() { return Studios.plot(Anchors.self()); }
 
     private static PublishScheduler.Out outbound() {
         return new PublishScheduler.Out() {

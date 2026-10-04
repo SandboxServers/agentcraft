@@ -18,9 +18,12 @@ import dev.agentcraft.mp.state.PublicTask;
 import dev.agentcraft.mp.state.StationWire;
 import dev.agentcraft.mp.state.TaskStatusWire;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -39,8 +42,10 @@ public final class Redactor {
             if (id == null) continue;
             String name = clip(agent.name(), 16);
             if (name.isBlank()) name = id;
+            // A viewer's client builds entity/agent/<skin> from it. The id is the Foreman's own default for a
+            // missing skin: a cast id shows its cast skin, any other id the default skin.
             String skin = clip(agent.skin(), 16);
-            if (skin.isBlank()) skin = id;
+            if (skin.isEmpty() || !Identifier.isValidPath(skin)) skin = id;
             boolean awaiting = false;
             for (Protocol.Decision decision : state.openDecisions()) {
                 if (agent.id().equals(AgentManager.owner(state, decision))) {
@@ -54,6 +59,7 @@ public final class Redactor {
         List<PublicTask> tasks = null;
         if (policy.taskTitles()) {
             tasks = new ArrayList<>();
+            Set<String> taskIds = new HashSet<>();
             for (Protocol.Task task : state.tasks().values()) {
                 if (tasks.size() == 32) break;
                 TaskStatusWire status = taskStatus(task.status());
@@ -62,6 +68,7 @@ public final class Redactor {
                 if (id.isEmpty()) continue;
                 String title = clip(task.title(), 80);
                 if (title.isBlank()) continue;
+                if (!taskIds.add(id)) continue; // two ids that cut or sanitize to one: the first keeps it
                 String assignee = ids.get(task.assignee());
                 tasks.add(new PublicTask(id, title, status, assignee));
             }
@@ -89,12 +96,19 @@ public final class Redactor {
         return id == null ? null : new PublicEvent.TaskDone(id);
     }
 
+    /**
+     * Foreman agent id to published id, for the agents that are published: the first 16 whose cut and
+     * sanitized id is not empty, is an identifier path (a viewer's client builds resource identifiers
+     * from it, and the game throws on any other character) and is not already taken. Every agent id
+     * that leaves the machine comes from this map: the agent list, a task's assignee, a say's agent
+     * and addressee, a task-done's agent.
+     */
     private static Map<String, String> publicIds(ForemanState state) {
         Map<String, String> ids = new LinkedHashMap<>();
         for (Protocol.Agent agent : state.agents().values()) {
             if (ids.size() == 16 || agent.id() == null) continue;
             String id = clip(agent.id(), 16);
-            if (id.isEmpty() || ids.containsValue(id)) continue;
+            if (id.isEmpty() || !Identifier.isValidPath(id) || ids.containsValue(id)) continue;
             ids.put(agent.id(), id);
         }
         return ids;

@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import dev.agentcraft.client.foreman.ForemanState;
 import dev.agentcraft.client.foreman.ForemanStates;
 import dev.agentcraft.client.foreman.Protocol;
+import dev.agentcraft.client.mp.MpMode;
 import dev.agentcraft.client.mp.publish.PolicyStore;
 import dev.agentcraft.client.mp.publish.PublishFeature;
 import dev.agentcraft.client.mp.publish.PublishScheduler;
@@ -13,6 +14,8 @@ import dev.agentcraft.client.mp.publish.Redactor;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
 import dev.agentcraft.mp.MpReasons;
+import dev.agentcraft.mp.Plot;
+import dev.agentcraft.mp.StudioId;
 import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicJson;
 import dev.agentcraft.mp.state.PublicPolicy;
@@ -21,9 +24,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -177,7 +182,7 @@ class PublishSchedulerTest {
         Harness harness = new Harness(4, store::current);
         var order = new ArrayList<String>();
         harness.recordOutput(order);
-        PublishFeature.applyPolicy(store, "sayText", true, () -> dev.agentcraft.client.mp.MpMode.MULTIPLAYER,
+        PublishFeature.applyPolicy(store, "sayText", true, () -> MpMode.MULTIPLAYER,
             () -> PLAYER, () -> STUDIO, harness.scheduler);
         var listener = PublishFeature.listener(harness.scheduler, () -> true, () -> true, store::current, () -> harness.state);
         listener.onSay(new Protocol.AgentSay("marlow", "newly enabled text", "user", 1));
@@ -297,6 +302,109 @@ class PublishSchedulerTest {
         }
     }
 
+    @Test void own_plot_becoming_known_or_moving_sends_the_current_state_again() {
+        Harness harness = new Harness(8);
+        harness.plot.set(Optional.empty());
+        harness.sendChanged(0, "thinking"); // a server refuses this one without a reply: the studio has no plot
+        harness.scheduler.flush(1, true);
+        assertEquals(1, harness.states.size());
+        // none to some, then another index, then another origin
+        var plots = List.of(plot(4, BlockPos.ZERO), plot(5, BlockPos.ZERO), plot(5, new BlockPos(128, 0, 0)));
+        for (int i = 0; i < plots.size(); i++) {
+            harness.plot.set(plots.get(i));
+            harness.scheduler.flush(2 + 2 * i, true);
+            harness.scheduler.flush(3 + 2 * i, true);
+            assertEquals(2 + i, harness.states.size());
+        }
+        harness.plot.set(Optional.empty()); // losing the plot sends nothing
+        harness.scheduler.flush(8, true);
+        assertEquals(List.of(1, 2, 3, 4), harness.states.stream().map(PublicStudioState::rev).toList());
+        assertEquals(1, harness.states.stream().map(PublishSchedulerTest::content).distinct().count());
+    }
+
+    @Test void idle_state_is_sent_again_once_per_resend_interval_and_not_before() {
+        long interval = PublishScheduler.RESEND_NANOS;
+        long tick = 50_000_000L;
+        assertTrue(interval >= 15_000_000_000L && interval <= 30_000_000_000L); // a few a minute, seen within half a minute
+        Harness harness = new Harness(4);
+        harness.sendChanged(0, "thinking");
+        for (long now = tick; now < interval; now += tick) harness.scheduler.flush(now, true);
+        harness.scheduler.flush(interval - 1, true);
+        assertEquals(1, harness.states.size());
+        for (long now = interval; now < 2 * interval; now += tick) harness.scheduler.flush(now, true);
+        assertEquals(2, harness.states.size());
+        harness.sendChanged(2 * interval - tick, "editing"); // a real send restarts the interval
+        for (long now = 2 * interval; now < 3 * interval - tick; now += tick) harness.scheduler.flush(now, true);
+        assertEquals(3, harness.states.size());
+        harness.scheduler.flush(3 * interval - tick, true);
+        assertEquals(List.of(1, 2, 3, 4), harness.states.stream().map(PublicStudioState::rev).toList());
+        assertEquals(content(harness.states.get(0)), content(harness.states.get(1)));
+        assertEquals(content(harness.states.get(2)), content(harness.states.get(3)));
+    }
+
+    @Test void resend_waits_for_the_state_window_and_goes_before_a_later_event() {
+        Harness harness = new Harness(1);
+        var order = new ArrayList<String>();
+        harness.sendChanged(0, "thinking");
+        harness.recordOutput(order);
+        harness.plot.set(plot(5, BlockPos.ZERO));
+        harness.scheduler.flush(999_999_998L, true);
+        harness.scheduler.offer(say("after-resend"), 999_999_999L, true);
+        assertEquals(List.of(), order);
+        assertTrue(harness.scheduler.isDirty());
+        harness.scheduler.flush(1_000_000_000L, true);
+        harness.scheduler.flush(1_000_000_001L, true);
+        assertEquals(List.of("state", "event"), order);
+    }
+
+    @Test void resend_shares_only_what_the_policy_shares_when_it_is_sent() {
+        var policy = new AtomicReference<>(new PublicPolicy(true, true, true, true));
+        Harness harness = new Harness(4, policy::get);
+        harness.sendChanged(0, "thinking");
+        PublicStudioState first = harness.states.getFirst();
+        assertTrue(first.agents().stream().anyMatch(agent -> agent.activity() != null));
+        assertNotNull(first.goal().text());
+        assertFalse(first.tasks().isEmpty());
+        policy.set(PublicPolicy.DEFAULT); // nothing marks the state dirty here: only a resend can send it
+        harness.scheduler.flush(PublishScheduler.RESEND_NANOS, true); // the interval
+        harness.plot.set(plot(5, BlockPos.ZERO));
+        harness.scheduler.flush(PublishScheduler.RESEND_NANOS + 1, true); // the plot
+        assertEquals(3, harness.states.size());
+        for (PublicStudioState resent : harness.states.subList(1, 3)) {
+            assertEquals(PublicPolicy.DEFAULT, resent.policy());
+            assertTrue(resent.agents().stream().allMatch(agent -> agent.activity() == null));
+            assertNull(resent.goal().text());
+            assertNull(resent.tasks());
+        }
+    }
+
+    @Test void nothing_is_sent_or_logged_outside_multiplayer_however_much_time_passes() {
+        Harness never = new Harness(4);
+        Harness left = new Harness(4);
+        left.sendChanged(0, "thinking"); // was in multiplayer once, so there is a sent state to send again
+        try (var capture = MpLog.capture()) {
+            for (long n = 1; n <= 6; n++) {
+                for (Harness harness : List.of(never, left)) {
+                    harness.plot.set(plot((int) n, BlockPos.ZERO));
+                    harness.scheduler.flush(n * PublishScheduler.RESEND_NANOS, false);
+                    PublishFeature.tick(harness.scheduler, MpMode.SINGLEPLAYER, true, true);
+                    assertFalse(harness.scheduler.isDirty());
+                }
+            }
+            assertTrue(capture.lines().isEmpty());
+        }
+        assertTrue(never.states.isEmpty());
+        assertEquals(1, left.states.size());
+    }
+
+    private static Optional<Plot> plot(int index, BlockPos origin) { return Optional.of(new Plot(index, StudioId.of(STUDIO), origin)); }
+
+    /** A sent state without its {@code rev}. */
+    private static PublicStudioState content(PublicStudioState state) {
+        return new PublicStudioState(0, state.foremanOnline(), state.agents(), state.counts(), state.goal(), state.ci(),
+            state.policy(), state.tasks());
+    }
+
     private static String agentState(PublicStudioState state) {
         return state.agents().stream().filter(agent -> agent.id().equals("marlow")).findFirst().orElseThrow().state().wire();
     }
@@ -317,6 +425,7 @@ class PublishSchedulerTest {
         final List<PublicEvent> events = new ArrayList<>();
         final AtomicInteger rate;
         final AtomicReference<PublicPolicy> policy;
+        final AtomicReference<Optional<Plot>> plot = new AtomicReference<>(plot(4, BlockPos.ZERO));
         final PublishScheduler scheduler;
         List<String> outputOrder;
 
@@ -328,7 +437,7 @@ class PublishSchedulerTest {
             this.state = state;
             this.rate = new AtomicInteger(initialRate);
             this.policy = new AtomicReference<>(policy.get());
-            scheduler = new PublishScheduler(() -> this.state, policy::get, this.rate::get, () -> PLAYER, () -> STUDIO, () -> 4,
+            scheduler = new PublishScheduler(() -> this.state, policy::get, this.rate::get, () -> PLAYER, () -> STUDIO, plot::get,
                 new PublishScheduler.Out() {
                     @Override public void state(PublicStudioState state) {
                         states.add(state);

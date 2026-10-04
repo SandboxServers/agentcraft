@@ -14,6 +14,8 @@ import dev.agentcraft.client.mp.publish.PublishScheduler;
 import dev.agentcraft.mp.MpEvents;
 import dev.agentcraft.mp.MpLog;
 import dev.agentcraft.mp.MpReasons;
+import dev.agentcraft.mp.Plot;
+import dev.agentcraft.mp.StudioId;
 import dev.agentcraft.mp.state.PublicEvent;
 import dev.agentcraft.mp.state.PublicPolicy;
 import dev.agentcraft.mp.state.PublicStudioState;
@@ -21,9 +23,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -194,7 +198,8 @@ class PublishFeatureTest {
         Harness(int rate) { this(rate, () -> PublicPolicy.DEFAULT); }
 
         Harness(int rate, java.util.function.Supplier<PublicPolicy> policy) {
-            scheduler = new PublishScheduler(() -> state, policy, () -> rate, () -> PLAYER, () -> STUDIO, () -> 4,
+            scheduler = new PublishScheduler(() -> state, policy, () -> rate, () -> PLAYER, () -> STUDIO,
+                () -> Optional.of(new Plot(4, StudioId.of(STUDIO), BlockPos.ZERO)),
                 new PublishScheduler.Out() {
                     @Override public void state(PublicStudioState state) { states.add(state); }
                     @Override public void event(PublicEvent event) { events.add(event); }
