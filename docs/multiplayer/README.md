@@ -53,14 +53,20 @@ Proposed defaults are what the campaign builds against. The owner can change any
 2. Confirm D-MP05: should visitors be able to build anywhere, or only outside plots?
 3. Who is on the first whitelist? The colo already runs today's server (as a preview; remote players' agents don't render correctly until the campaign lands, A-13). Players also need the edge to forward TCP 25565 (A-53).
 4. Should the cast's `upstream-sync-steward` open a conversation with upstream about contributing multiplayer later (D-MP04)?
-5. Confirm or change what MP-13 (#18) decided under D-MP05, and rule on its known limits:
-   - with an empty hand a visitor may use only doors, trapdoors, fence gates, buttons and levers inside a plot;
-   - protection covers the plot plus a margin of one block, because beds, doors and attached blocks reach across the edge;
-   - a visitor holding any item cannot open a door inside a plot;
-   - structures completed from outside the margin that need blocks the owner placed across the edge (a nether portal, a golem or wither pattern) are left open; the eye of ender is closed;
-   - not covered at all: water, lava and fire coming in from outside, a visitor's projectiles (closing that needs a second mixin, which the packet was not allowed), trampling.
-6. From the pull-request review: confirm that a server refuses to start when `plotStride` no longer matches its stored plots (the alternative is to send each plot's origin on the wire, a contract change); that the remote DevBridge commands stay behind `AGENTCRAFT_DEV_REMOTE=1`; and whether singleplayer should get back what MP-07's intent filter dropped (the `ci:<repoId>` lamp binding, CI lamps beyond eight repositories, lamps for agent ids over 16 characters).
-7. Two telemetry catalog points for the next edit of work-packets.md: `studio_event_rejected` should gain the reason `bad_version` (MP-06, #11, already emits it), and `plot_command` keeps its fields, so a refused command carries no `reason` (MP-03, #8).
+5. Should the harness's live up/down cycle on Windows be run before #4 merges, and by whom? (Asked in the pull-request review; no decision yet.)
+
+## Owner rulings from the pull-request review (2026-10-04)
+
+Given by the owner's reviewer on #5, in answer to the questions the review left open:
+
+- **Plot stride.** A server refuses to start when `plotStride` no longer matches its stored plots. No wire change (a plot's origin is not sent).
+- **Plot protection (MP-13, #18), under D-MP05.** Approved as built: with an empty hand a visitor may use only doors, trapdoors, fence gates, buttons and levers inside a plot; protection covers the plot plus a margin of one block; the whole column above a plot is protected; non-player entities in a plot are protected; structures completed from outside that need blocks the owner placed across the edge (a nether portal, a golem pattern) are left open. **Pistons pushing in from outside stay a tracked follow-up** (it needs a mixin the packet was not allowed); so do the other known limits in its worknote (fluids and fire from outside, projectiles, trampling).
+- **Telemetry catalog.** A refused `plot_command` carries no `reason`. `studio_event_rejected` gains the reason `bad_version`. Both are now in work-packets.md.
+- **Typed telemetry values in `MpLog`.** Deferred until after Wave 1; not blocking.
+- **Singleplayer and MP-07 (#12).** Singleplayer stays unchanged: the wire filter (no `ci:<repoId>` key, eight CI slots, wire-legal agent ids, the 64 caps) applies only to what is sent to a server. The `ci:<repoId>` lamp binding is a documented feature.
+- **`/agentcraft` open to every player, and no cap on plots.** Fine for now behind the whitelist. **Every new subcommand must carry its own permission check.**
+- **Remote DevBridge commands** stay behind `AGENTCRAFT_DEV_REMOTE=1`, which the harness sets for the clients it launches (#4).
+- **Diffs for Wave 1 reviews** are taken from `3d6a58f`.
 
 ## Packet status
 
