@@ -343,14 +343,51 @@ class PlotRegistryTest {
         UUID b = UUID.randomUUID();
         UUID c = UUID.randomUUID();
         String first = row(0, a, 0, 0);
-        String one = "1 of 2 rows in plots.json were rejected (invalid, duplicate or overlapping)";
-        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, b, 136, 0) + "]}"), 128), "an origin off the 16 grid");
-        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(0, b, 128, 0) + "]}"), 128), "a duplicate index");
-        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, a, 128, 0) + "]}"), 128), "a duplicate owner");
-        assertEquals(Optional.of(one), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, b, 16, 0) + "]}"), 128), "an overlapping origin");
+        String one = "1 of 2 rows in plots.json were rejected: row 1 (%s); rows are counted from 0";
+        assertEquals(Optional.of(one.formatted("invalid")), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, b, 136, 0) + "]}"), 128), "an origin off the 16 grid");
+        assertEquals(Optional.of(one.formatted("duplicate_index")), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(0, b, 128, 0) + "]}"), 128), "a duplicate index");
+        assertEquals(Optional.of(one.formatted("duplicate_owner")), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, a, 128, 0) + "]}"), 128), "a duplicate owner");
+        assertEquals(Optional.of(one.formatted("overlap")), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + "," + row(1, b, 16, 0) + "]}"), 128), "an overlapping origin");
         String message = PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + first + ",7," + row(1, b, 128, 0) + "," + row(1, c, 128, 128) + "]}"), 128).orElseThrow();
-        assertEquals("2 of 4 rows in plots.json were rejected (invalid, duplicate or overlapping)", message);
+        assertEquals("2 of 4 rows in plots.json were rejected: row 1 (invalid), row 3 (duplicate_index); rows are counted from 0", message);
         for (UUID owner : List.of(a, b, c)) assertFalse(message.contains(owner.toString()), "the reason names no owner");
+    }
+
+    @Test
+    void a_refused_start_names_each_rejected_row_and_its_reason(@TempDir Path dir) throws Exception {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        // Row 1 repeats index 0; row 4 is a new index and owner 16 blocks from row 0: the same ground.
+        String text = "{\"plots\":[" + row(0, a, 0, 0) + "," + row(0, b, 128, 0) + "," + row(1, b, 128, 0) + ","
+            + row(2, UUID.randomUUID(), 128, 128) + "," + row(3, UUID.randomUUID(), 16, 0) + "]}";
+        PlotStore.Loaded loaded = loadText(dir, text);
+        assertEquals(List.of(new PlotStore.Rejected(1, PlotStore.Reason.DUPLICATE_INDEX), new PlotStore.Rejected(4, PlotStore.Reason.OVERLAP)),
+            loaded.rejected());
+        assertEquals(2, loaded.skipped());
+        assertEquals(3, loaded.plots().size());
+        assertEquals(Optional.of("2 of 5 rows in plots.json were rejected: row 1 (duplicate_index), row 4 (overlap); rows are counted from 0"),
+            PlotStore.startRefusal(loaded, 128));
+    }
+
+    @Test
+    void a_refused_start_names_at_most_eight_rows(@TempDir Path dir) throws Exception {
+        String valid = row(0, UUID.randomUUID(), 0, 0);
+        String eight = "row 1 (invalid), row 2 (invalid), row 3 (invalid), row 4 (invalid), row 5 (invalid), row 6 (invalid),"
+            + " row 7 (invalid), row 8 (invalid)";
+        assertEquals(Optional.of("8 of 9 rows in plots.json were rejected: " + eight + "; rows are counted from 0"),
+            PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + valid + ",7".repeat(8) + "]}"), 128), "eight rows are all named");
+        assertEquals(Optional.of("11 of 12 rows in plots.json were rejected: " + eight + " and 3 more; rows are counted from 0"),
+            PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + valid + ",7".repeat(11) + "]}"), 128));
+    }
+
+    @Test
+    void a_refused_start_repeats_nothing_from_the_file(@TempDir Path dir) throws Exception {
+        // Text in every field a hostile file controls, with a line break that would forge a log line.
+        String odd = "{\"index\":\"idx-INJECT\",\"owner\":\"Steve\\nevent=plot_allocated INJECT\",\"x\":0,\"y\":0,\"z\":0,\"INJECT\":\"INJECT\"}";
+        String badOwner = "{\"index\":1,\"owner\":\"Steve\\nevent=plot_allocated INJECT\",\"x\":128,\"y\":0,\"z\":0}";
+        String message = PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "," + odd + "," + badOwner + "]}"), 128).orElseThrow();
+        assertEquals("2 of 3 rows in plots.json were rejected: row 1 (invalid), row 2 (invalid); rows are counted from 0", message);
+        for (String text : List.of("INJECT", "Steve", "event=", "\n")) assertFalse(message.contains(text), text);
     }
 
     @Test
@@ -361,12 +398,18 @@ class PlotRegistryTest {
         // Every path that stores an origin (allocate and assign) leaves the file on the grid of its stride.
         assertEquals(Optional.empty(), PlotStore.startRefusal(PlotStore.load(dir), 128));
         // Plot 0 is at the origin at every stride; the other three would be drawn elsewhere by a client.
-        assertEquals(Optional.of("3 of 4 plots are not where plotStride 256 puts their index:"
-            + " plots.json was written with another plotStride; restore the old value or move the plots"),
+        String tail = "): plots.json was written with another plotStride; restore the old value or move the plots";
+        assertEquals(Optional.of("3 of 4 plots are not where plotStride 256 puts their index (plot 1, plot 2, plot 7" + tail),
+            PlotStore.startRefusal(PlotStore.load(dir), 256));
+        // More than eight are cut the same way as rejected rows.
+        for (int i = 0; i < 7; i++) assertTrue(registry.allocateStored(dir, StudioId.of(UUID.randomUUID()), 128).created());
+        assertEquals(Optional.of("10 of 11 plots are not where plotStride 256 puts their index"
+            + " (plot 1, plot 2, plot 3, plot 4, plot 5, plot 6, plot 7, plot 8 and 2 more" + tail),
             PlotStore.startRefusal(PlotStore.load(dir), 256));
         // A hand-moved origin is the same disagreement, and so is a stride the grid refuses.
         String moved = "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "," + row(1, UUID.randomUUID(), 1280, 0) + "]}";
-        assertTrue(PlotStore.startRefusal(loadText(dir, moved), 128).orElseThrow().startsWith("1 of 2 plots are not where plotStride 128 "));
+        assertEquals(Optional.of("1 of 2 plots are not where plotStride 128 puts their index (plot 1" + tail),
+            PlotStore.startRefusal(loadText(dir, moved), 128));
         assertTrue(PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "]}"), 8).isPresent());
         assertEquals(Optional.empty(), PlotStore.startRefusal(loadText(dir, "{\"plots\":[" + row(0, UUID.randomUUID(), 0, 0) + "]}"), 256));
     }
