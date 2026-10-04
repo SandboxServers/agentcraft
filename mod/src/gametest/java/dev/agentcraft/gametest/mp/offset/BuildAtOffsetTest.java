@@ -29,6 +29,9 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -44,6 +47,9 @@ public final class BuildAtOffsetTest {
 	private static final int SITE_MAX_Y = 100;
 	private static final int SITE_MAX_Z = 54;
 	private static final int FEET = 66;
+	/** The last cell inside the site box along x, and the first one outside it (plot coordinates). */
+	private static final BlockPos DROP_INSIDE = new BlockPos(SITE_MAX_X, FEET, 0);
+	private static final BlockPos DROP_OUTSIDE = new BlockPos(SITE_MAX_X + 1, FEET, 0);
 	private static final String LOCAL_PLAN_FILE = "agentcraft-hq-plan.dat";
 	private static final StudioId STUDIO_A = StudioId.of(UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
 	private static final StudioId STUDIO_B = StudioId.of(UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
@@ -170,6 +176,8 @@ public final class BuildAtOffsetTest {
 			MinecraftServer server = level.getServer();
 			ensurePlotZeroBuilt(level);
 			byte[] localPlanBefore = readLocalPlan(server);
+			// without a plan file to compare, the equality below would hold between two missing files
+			helper.assertTrue(localPlanBefore != null && localPlanBefore.length > 0, "plot 0 has a plan file before the build at plot 2");
 			buildAtPlot(level, STUDIO_B, ORIGIN_PLOT2, false);
 			BlockPos edit = new BlockPos(ORIGIN_PLOT2.getX(), FEET, ORIGIN_PLOT2.getZ());
 			BlockState beforeEdit = level.getBlockState(edit);
@@ -182,6 +190,30 @@ public final class BuildAtOffsetTest {
 				helper.assertTrue(Arrays.equals(localPlanBefore, localPlanAfter), "plot 0 plan file unchanged");
 			} finally {
 				level.setBlock(edit, beforeEdit, QUIET);
+			}
+		});
+	}
+
+	@GameTest(maxTicks = 120)
+	public void buildAtPlotOneSweepsDropsOnlyInsideItsOwnBox(GameTestHelper helper) {
+		runWithFakePlots(helper, () -> {
+			ServerLevel level = helper.getLevel();
+			List<ItemEntity> drops = new ArrayList<>();
+			try {
+				ItemEntity inside = drop(level, DROP_INSIDE.offset(ORIGIN_PLOT1), drops);
+				ItemEntity atPlotZero = drop(level, DROP_INSIDE, drops);
+				ItemEntity outside = drop(level, DROP_OUTSIDE.offset(ORIGIN_PLOT1), drops);
+				for (ItemEntity drop : drops) {
+					// a drop the level does not return could not be swept by any build
+					helper.assertTrue(level.getEntitiesOfClass(ItemEntity.class, drop.getBoundingBox()).contains(drop),
+						"the level returns the drop at " + drop.blockPosition().toShortString());
+				}
+				buildAtPlot(level, STUDIO_A, ORIGIN_PLOT1, false);
+				helper.assertTrue(inside.isRemoved(), "a build at plot 1 sweeps the drop inside its box");
+				helper.assertFalse(atPlotZero.isRemoved(), "a build at plot 1 leaves the drop at the same place in plot 0");
+				helper.assertFalse(outside.isRemoved(), "a build at plot 1 leaves the drop one block outside its box");
+			} finally {
+				drops.forEach(ItemEntity::discard);
 			}
 		});
 	}
@@ -324,6 +356,20 @@ public final class BuildAtOffsetTest {
 		Anchors.Builder anchors = Anchors.builder(builder.id());
 		builder.build(level, anchors, new HqBuilder.Options(force, origin, studio));
 		Anchors.publish(studio, anchors.build());
+	}
+
+	/** A resting dropped item in the middle of the cell {@code pos}, added to {@code drops} for the caller's clean-up. */
+	private static ItemEntity drop(ServerLevel level, BlockPos pos, List<ItemEntity> drops) {
+		level.getChunkAt(pos);
+		// A chunk loaded in this tick shows its entities only after its promotion ran, and that is a
+		// queued server-thread task (ChunkHolder.scheduleFullChunkPromotion).
+		while (level.getChunkSource().pollTask()) {
+			// run what is queued
+		}
+		ItemEntity item = new ItemEntity(level, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5, new ItemStack(Items.STICK), 0, 0, 0);
+		level.addFreshEntity(item);
+		drops.add(item);
+		return item;
 	}
 
 	private static byte[] readLocalPlan(MinecraftServer server) {
