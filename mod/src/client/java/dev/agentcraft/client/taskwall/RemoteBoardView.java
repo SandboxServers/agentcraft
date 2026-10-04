@@ -17,6 +17,10 @@ import org.jspecify.annotations.Nullable;
  * its whole list) and the Todo lane also carries {@code Counts.blocked} so the header can show the red
  * "N blocked" count. A task list is present only when the owner opted task titles in; then it is a
  * partial detail list under the counts.
+ *
+ * <p>{@code online} is false when the studio's presence is down or the owner's Foreman link is down
+ * ({@code foremanOnline}): the relay keeps the last state with that flag cleared, and the wall then
+ * shows the "Foreman offline" veil over it, as {@code RemoteMonitorView} does for a monitor.
  */
 public record RemoteBoardView(int rev, List<Column> columns, List<Card> cards, boolean online, boolean present) {
 
@@ -60,7 +64,7 @@ public record RemoteBoardView(int rev, List<Column> columns, List<Card> cards, b
 				}
 			}
 		}
-		return new RemoteBoardView(state.rev(), columns, cards, online, true);
+		return new RemoteBoardView(state.rev(), columns, cards, online && state.foremanOnline(), true);
 	}
 
 	/** The lane a public task shows in; cancelled and unknown tasks are hidden (null). */

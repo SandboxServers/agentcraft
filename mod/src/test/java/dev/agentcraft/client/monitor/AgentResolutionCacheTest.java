@@ -69,4 +69,28 @@ class AgentResolutionCacheTest {
 		assertEquals("2:annex", cache.resolve(pos, Direction.NORTH, 1, 1, layout("annex", 2), resolver));
 		assertEquals(2, calls(calls, pos));
 	}
+
+	@Test
+	void a_panel_that_changes_width_height_or_facing_re_resolves_under_the_same_layout() {
+		AgentResolutionCache cache = new AgentResolutionCache();
+		BlockPos pos = new BlockPos(4, 2, 5);
+		Anchors.Layout layout = layout("hq", 2);
+		Map<BlockPos, AtomicInteger> calls = new HashMap<>();
+		// echoes the geometry it was asked about, so a stale hit shows as the old geometry
+		AgentResolutionCache.Resolver resolver = (l, p, facing, w, h) -> calls.computeIfAbsent(p, k -> new AtomicInteger()).incrementAndGet() + ":" + facing.name()
+			+ ":" + w + "x" + h;
+
+		assertEquals("1:NORTH:1x1", cache.resolve(pos, Direction.NORTH, 1, 1, layout, resolver));
+		// widened to the right: the origin block and the layout are the same, the anchor may now be on it
+		assertEquals("2:NORTH:2x1", cache.resolve(pos, Direction.NORTH, 2, 1, layout, resolver));
+		// grown upwards
+		assertEquals("3:NORTH:2x2", cache.resolve(pos, Direction.NORTH, 2, 2, layout, resolver));
+		// replaced facing another way
+		assertEquals("4:EAST:2x2", cache.resolve(pos, Direction.EAST, 2, 2, layout, resolver));
+		// shrunk back
+		assertEquals("5:EAST:1x1", cache.resolve(pos, Direction.EAST, 1, 1, layout, resolver));
+		// and a steady frame with the geometry unchanged is still a hit
+		assertEquals("5:EAST:1x1", cache.resolve(pos, Direction.EAST, 1, 1, layout, resolver));
+		assertEquals(5, calls(calls, pos));
+	}
 }
