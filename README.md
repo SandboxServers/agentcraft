@@ -165,7 +165,7 @@ AgentCraft is built to point at code you care about.
 
 ## Quick start
 
-**You need:** Windows 10 or 11, or macOS, Java 25, Node 22+, git, and a copy of
+**You need:** Windows 10 or 11, or macOS, Java 25, Node 22.18+, git, and a copy of
 Minecraft: Java Edition.
 
 **For the real agents** you need Claude API access, either of these:
