@@ -41,6 +41,45 @@ loom {
 	}
 }
 
+// Fork (MP-T): headless Fabric game tests in their own source set, src/gametest. Loom makes `check`
+// (and so `build`) depend on runGameTest, so every build boots this game-test server once.
+fabricApi {
+	configureTests {
+		createSourceSet = true
+		modId = "agentcraft-gametest"
+		enableGameTests = true
+		enableClientGameTests = false
+	}
+}
+// Keep that server safe inside a build: a 2 GB heap, a 5-minute fuse, and an empty run directory for
+// every run (Loom clears only the client game-test one), so each run builds the HQ in a fresh world.
+loom.runs.gameTest.vmArgs "-Xmx2G"
+def cleanGameTestRunDir = tasks.register("cleanGameTestRunDir", Delete) {
+	delete(layout.buildDirectory.dir("run/gameTest"))
+}
+tasks.matching { it.name == "runGameTest" }.configureEach {
+	dependsOn(cleanGameTestRunDir)
+	timeout = java.time.Duration.ofMinutes(5)
+}
+// Fabric runs only the classes listed under the `fabric-gametest` entrypoint. Fill that list from the
+// sources, so a new class with @GameTest methods is picked up without editing a shared file.
+def gameTestSources = fileTree("src/gametest/java") { include "**/*.java"; exclude "**/package-info.java" }
+tasks.named("processGametestResources") {
+	inputs.files(gameTestSources).withPropertyName("gameTestSources").withPathSensitivity(PathSensitivity.RELATIVE)
+	filesMatching("fabric.mod.json") {
+		def classes = []
+		gameTestSources.visit {
+			if (!it.directory && it.file.getText("UTF-8") =~ /@(?:[\w.]+\.)?GameTest\b/) {
+				classes << it.relativePath.pathString.replaceFirst(/\.java$/, "").replace("/", ".")
+			}
+		}
+		if (classes.empty) {
+			throw new GradleException("No class under src/gametest/java contains @GameTest")
+		}
+		expand(gameTestClasses: classes.sort().join('", "'))
+	}
+}
+
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
@@ -87,6 +126,15 @@ def prepareRunDir = tasks.register("prepareRunDir", Copy) {
 
 tasks.matching { it.name == "runClient" }.configureEach {
 	dependsOn(prepareRunDir)
+}
+
+// Fork (MP-T, audit A-03): Loom's decompiler rewrites artifacts that compilation and game runs read.
+// When build and mcSources share one task graph, keep the decompiler and mcSources behind them.
+def minecraftArtifactConsumers = tasks.matching {
+	it.name == "build" || it.name == "test" || it.name == "runGameTest" || it.name.startsWith("compile")
+}
+tasks.matching { it.name == "mcSources" || (it.name.startsWith("gen") && it.name.endsWith("SourcesWithVineflower")) }.configureEach {
+	mustRunAfter(minecraftArtifactConsumers)
 }
 
 // Unpack the decompiled Minecraft sources into build/mcsrc so agents can grep real 26.3 APIs
