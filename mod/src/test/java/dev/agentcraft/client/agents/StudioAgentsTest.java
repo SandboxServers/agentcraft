@@ -143,6 +143,41 @@ class StudioAgentsTest {
 	}
 
 	@Test
+	void needs_you_marker_is_never_shown_for_another_studios_agent() {
+		StudioView visitorView = new StudioView(StudioId.of(UUID.randomUUID()), false, "Owner", true, Anchors.Layout.EMPTY, null, 1);
+		AgentView visitor = new AgentView("tove");
+		visitor.attach(new StudioAgents(visitorView, -11_000), true, "Owner");
+		visitor.updatePublic(new PublicAgent("tove", "Tove", "tove", AgentStateWire.WAITING_USER, StationWire.USER,
+			true, false, true, null), false);
+
+		assertFalse(visitor.needsYou(), "an agent waiting for its own owner shows no marker to a visitor");
+		assertTrue(visitor.awaitingUser);
+		assertEquals("waiting", visitor.family);
+		assertEquals("waiting user", visitor.activityLine());
+
+		AgentView own = new AgentView("tove");
+		own.state = Protocol.AgentState.WAITING_USER;
+		assertTrue(own.needsYou());
+		own.state = Protocol.AgentState.EDITING;
+		assertFalse(own.needsYou());
+		own.awaitingUser = true;
+		assertTrue(own.needsYou());
+	}
+
+	@Test
+	void a_remote_agents_skin_is_resolved_again_only_when_its_published_name_changes() {
+		AgentView view = new AgentView("wren");
+		view.skinName = "wren";
+
+		assertFalse(view.skinChanged("wren"));
+		assertTrue(view.skinChanged("kit"));
+		assertEquals("kit", view.skinName);
+		assertFalse(view.skinChanged("kit"));
+		assertTrue(view.skinChanged(null));
+		assertFalse(view.skinChanged(null));
+	}
+
+	@Test
 	void studio_attach_and_detach_telemetry_is_captured_without_public_text() {
 		UUID owner = UUID.randomUUID();
 		UUID player = UUID.randomUUID();

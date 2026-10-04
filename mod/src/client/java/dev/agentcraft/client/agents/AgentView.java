@@ -6,6 +6,7 @@ import dev.agentcraft.client.foreman.Protocol.AgentState;
 import dev.agentcraft.client.ui.UiStyle;
 import dev.agentcraft.mp.StudioId;
 import dev.agentcraft.mp.state.PublicAgent;
+import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -20,6 +21,8 @@ public final class AgentView {
 	public boolean remote;
 	public String ownerName = "";
 	StudioAgents studioAgents;
+	/** The public skin name this agent's entity was last given (remote studios only). */
+	@Nullable String skinName;
 	public String name;
 	/** Identity colour (scarf/badge), ARGB. */
 	public int color;
@@ -70,6 +73,18 @@ public final class AgentView {
 		this.id = id;
 		this.plateKey = id;
 		this.name = id;
+	}
+
+	/**
+	 * Remember the skin name a remote studio publishes for this agent; true when it differs from the
+	 * one its entity was last given, so the entity's skin is resolved again only on a change.
+	 */
+	boolean skinChanged(@Nullable String published) {
+		if (Objects.equals(skinName, published)) {
+			return false;
+		}
+		skinName = published;
+		return true;
 	}
 
 	void attach(StudioAgents studio, boolean remote, String ownerName) {
@@ -195,9 +210,10 @@ public final class AgentView {
 	/**
 	 * Show the pulsing clay "!" above this agent: it owns an open decision ({@link #awaitingUser},
 	 * also while it already works on something else) or it is asking you ({@code waiting_user}).
-	 * Never while off shift or while the Foreman is offline.
+	 * Never while off shift or while the Foreman is offline, and never in another player's studio:
+	 * that agent waits for its owner, not for you (its plate still says that it waits).
 	 */
 	public boolean needsYou() {
-		return active && !stale && (awaitingUser || state == AgentState.WAITING_USER);
+		return !remote && active && !stale && (awaitingUser || state == AgentState.WAITING_USER);
 	}
 }

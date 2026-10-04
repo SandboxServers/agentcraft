@@ -385,7 +385,7 @@ public final class AgentsFeature {
 	/** Agents showing the "needs you" marker right now (QA: should match the open decisions + waiting_user agents). */
 	private static int exclaims() {
 		int n = 0;
-		for (ClientAgentEntity e : AgentManager.get().allEntities()) {
+		for (ClientAgentEntity e : AgentManager.get().entities().values()) {
 			if (e.view().needsYou()) {
 				n++;
 			}

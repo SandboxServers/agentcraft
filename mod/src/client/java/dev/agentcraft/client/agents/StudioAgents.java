@@ -298,6 +298,8 @@ final class StudioAgents {
 				}
 				entities.put(a.id(), e);
 				byEntityId.put(e.getId(), e);
+			} else if (e.view().skinChanged(a.skin())) {
+				e.setSkin(AgentSkins.get(a.id(), a.skin()));
 			}
 			AgentView v = e.view();
 			v.attach(this, true, view.ownerName());
@@ -359,6 +361,7 @@ final class StudioAgents {
 		}
 		ClientAgentEntity e = new ClientAgentEntity(lvl, a.id(), AgentSkins.get(a.id(), a.skin()));
 		e.setId(entityId);
+		e.view().skinName = a.skin();
 		e.view().attach(this, true, view.ownerName());
 		Anchors.Layout layout = view.layout();
 		GridPathfinder pf = layout.isEmpty() ? null : new GridPathfinder(lvl, layout.bounds());
@@ -374,6 +377,7 @@ final class StudioAgents {
 			var en = it.next();
 			if (!keep.contains(en.getKey())) {
 				remove(lvl, en.getValue());
+				userSpots.remove(en.getKey()); // ids come from the remote studio: keep nothing for an agent that left
 				it.remove();
 			}
 		}
@@ -665,6 +669,9 @@ final class StudioAgents {
 		}
 		entities.clear();
 		byEntityId.clear();
+		if (remote()) {
+			userSpots.clear();
+		}
 	}
 
 	void detach() {
