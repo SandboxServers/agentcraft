@@ -76,7 +76,5 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - run: chmod +x gradlew
+      # build runs the JUnit tests and, through check, the game tests (runGameTest)
       - run: ./gradlew build --stacktrace
-      - name: game tests
-        if: hashFiles('mod/src/gametest/**') != ''
-        run: ./gradlew runGameTest --stacktrace
