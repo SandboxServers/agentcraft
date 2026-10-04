@@ -57,8 +57,8 @@ import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.phys.Vec3;
 
-/** Built-in DevBridge commands. See mod/DEV.md for the reference. */
-final class DevCommands {
+/** Built-in DevBridge commands. See mod/DEV.md for the reference. Public only for {@link #requireRemoteOptIn()}. */
+public final class DevCommands {
 	/** Radius meaning "the whole render distance" (clamped to renderDistance-1). */
 	static final int FULL_RADIUS = 64;
 	/** dev.camera: how close (blocks / degrees) the rendered camera must get to the request. */
@@ -66,6 +66,13 @@ final class DevCommands {
 	static final double CAMERA_ROT_TOLERANCE = 0.05;
 
 	private static final AtomicBoolean QUITTING = new AtomicBoolean(false);
+
+	/**
+	 * Opt-in for the dev commands that act on a remote server; only the exact value {@code 1} enables them.
+	 * Read once, and not through {@code ClientEnv.flag}, which also takes true/yes/on. Tests set the value.
+	 */
+	static final String REMOTE_OPT_IN = "AGENTCRAFT_DEV_REMOTE";
+	static String remoteOptInValue = System.getenv(REMOTE_OPT_IN);
 
 	private DevCommands() {
 	}
@@ -90,10 +97,11 @@ final class DevCommands {
 			"{x,y,z, yaw,pitch | lookAt:{x,y,z} | anchor:name, studio?:UUID|own, fov?:30-110 (default: the player's FOV option), mode?:spectator|creative|keep,"
 				+ " feet?:false, hideHud?, closePause?:true} - put the camera (eye) exactly there; fails if it can't."
 				+ " anchor fills x/y/z/yaw/pitch from dev.anchors (cam_* = eye, others = feet);"
-				+ " on a remote server this sends /gamemode and /tp as the player (needs op)",
+				+ " on a remote server this sends /gamemode and /tp as the player (needs op and AGENTCRAFT_DEV_REMOTE=1)",
 			DevCommands::camera);
 		DevBridge.register("dev.release", 10_000,
-			"{mode?:creative|keep} - give the view back to the player: clears the FOV pin, shows the HUD, spectator -> creative (flying)",
+			"{mode?:creative|keep} - give the view back to the player: clears the FOV pin, shows the HUD, spectator -> creative (flying);"
+				+ " on a remote server spectator -> creative sends /gamemode as the player (needs op and AGENTCRAFT_DEV_REMOTE=1)",
 			DevCommands::release);
 		DevBridge.register("dev.screenshot", req -> {
 			Fields f = Fields.of(req);
@@ -102,13 +110,15 @@ final class DevCommands {
 		},
 			"{name, hideHud?:true, frames?:3 (1-600), waitChunks?:true, chunkRadius?:renderDistance-1, chunkTimeoutMs?:30000} -> {path,width,height,stats}",
 			DevCommands::screenshot);
-		DevBridge.register("dev.time", 10_000, "{ticks: 0..2147483647} - set the day time (6000 noon, 12000 golden hour, 18000 night, 23300 sunrise)",
+		DevBridge.register("dev.time", 10_000, "{ticks: 0..2147483647} - set the day time (6000 noon, 12000 golden hour, 18000 night, 23300 sunrise);"
+			+ " on a remote server this sends /time as the player (needs op and AGENTCRAFT_DEV_REMOTE=1)",
 			(req, mc) -> {
 				long ticks = Fields.of(req).integer("ticks", 0, Integer.MAX_VALUE);
 				return serverCommand(mc, "time set " + ticks).thenCompose(r -> FrameScheduler.afterFrames(2).thenApply(v -> r));
 			});
 		// Note: the field is 'weather', not 'type' ('type' is the message type).
-		DevBridge.register("dev.weather", 10_000, "{clear?:true} or {weather: clear|rain|thunder}", (req, mc) -> {
+		DevBridge.register("dev.weather", 10_000, "{clear?:true} or {weather: clear|rain|thunder};"
+			+ " on a remote server this sends /weather as the player (needs op and AGENTCRAFT_DEV_REMOTE=1)", (req, mc) -> {
 			Fields f = Fields.of(req);
 			String type = f.has("weather") ? f.str("weather").toLowerCase(Locale.ROOT) : f.optBool("clear", true) ? "clear" : "rain";
 			if (!Set.of("clear", "rain", "thunder").contains(type)) {
@@ -118,7 +128,7 @@ final class DevCommands {
 		});
 		DevBridge.register("dev.command", 30_000,
 			"{cmd} - run a command as the player with full permissions -> {messages[], success, result}; on a remote server send it"
-				+ " as the player instead (needs op) -> {cmd, sent:true}",
+				+ " as the player instead (needs op and AGENTCRAFT_DEV_REMOTE=1) -> {cmd, sent:true}",
 			(req, mc) -> serverCommand(mc, Fields.of(req).nonBlank("cmd")));
 		DevBridge.register("dev.screen", 10_000, "{open: name|null} - open a screen (title|pause|chat|inventory|options|<registered>) or close it",
 			DevCommands::screen);
@@ -217,6 +227,14 @@ final class DevCommands {
 			throw new DevException("needs a singleplayer (integrated server) world");
 		}
 		return server;
+	}
+
+	/** Refuse a dev command that acts on a remote server, before its first side effect, unless the client opted in. */
+	public static void requireRemoteOptIn() {
+		if (!"1".equals(remoteOptInValue)) {
+			throw new DevException("this needs " + REMOTE_OPT_IN + "=1 in the game's environment: the remote dev commands act on a"
+				+ " shared server with the player's own rights, so they are off unless the client was started with it");
+		}
 	}
 
 	static String fmt3(double d) {
@@ -498,6 +516,9 @@ final class DevCommands {
 
 		return DevBridge.onClient(mc, () -> {
 			needPlayer(mc);
+			if (mc.getSingleplayerServer() == null) {
+				requireRemoteOptIn(); // every remote camera sends /tp: refuse before the screen, FOV and HUD change
+			}
 			// Refuse before any side effect (the server re-checks its own border before teleporting).
 			checkBorder(mc.level.getWorldBorder(), r);
 			LocalPlayer player = mc.player;
@@ -612,6 +633,7 @@ final class DevCommands {
 		// On the client thread, like every other command this class sends: the continuation that calls
 		// this can run on the DevBridge socket thread.
 		return DevBridge.onClient(mc, () -> {
+			requireRemoteOptIn(); // camera() already refused, before its side effects; this guards the send itself
 			var conn = mc.getConnection();
 			if (conn == null) {
 				throw new DevException("not connected to a server");
@@ -664,6 +686,11 @@ final class DevCommands {
 			throw new DevException("field 'mode' must be creative|keep (got '" + mode + "')");
 		}
 		return DevBridge.onClient(mc, () -> {
+			boolean sendsRemote = releaseSendsRemote(mode, mc.getSingleplayerServer() != null,
+				mc.player != null && mc.gameMode != null && mc.gameMode.getPlayerMode() == GameType.SPECTATOR);
+			if (sendsRemote) {
+				requireRemoteOptIn(); // before the FOV pin and the HUD change
+			}
 			DevCamera.releaseFov();
 			if (mc.gui.hud.isHidden()) {
 				mc.gui.hud.toggle();
@@ -676,7 +703,7 @@ final class DevCommands {
 				return new Object[] {server, mc.player.getUUID()};
 			}
 			// Remote: the server owns the game mode; put a spectator back in creative as the integrated path does.
-			if (mc.gameMode != null && mc.gameMode.getPlayerMode() == GameType.SPECTATOR) {
+			if (sendsRemote) {
 				var conn = mc.getConnection();
 				if (conn == null) {
 					throw new DevException("not connected to a server");
@@ -708,6 +735,11 @@ final class DevCommands {
 		});
 	}
 
+	/** dev.release sends a command only to put a remote spectator back in creative; the rest of it is local. */
+	static boolean releaseSendsRemote(String mode, boolean integrated, boolean spectator) {
+		return !integrated && spectator && !mode.equals("keep");
+	}
+
 	// ------------------------------------------------------------------ dev.quit
 
 	static CompletableFuture<JsonObject> quit(JsonObject json, Minecraft mc) {
@@ -720,7 +752,8 @@ final class DevCommands {
 			CompletableFuture.delayedExecutor(250, TimeUnit.MILLISECONDS).execute(() -> mc.execute(() -> {
 				stopRan.set(true);
 				if (mc.getSingleplayerServer() == null && mc.getConnection() != null) {
-					// Remote: leave the server before stopping. There is no world of ours to save.
+					// Remote: leave the server before stopping. There is no world of ours to save. No remote
+					// opt-in: this only disconnects this client, as closing the window does; nothing is sent as the player.
 					mc.disconnectWithProgressScreen();
 				}
 				mc.stop();
@@ -993,12 +1026,16 @@ final class DevCommands {
 	}
 
 	/** Remote dev.command/time/weather: send the same validated command text to the real server. */
-	private static JsonObject remoteCommand(Minecraft mc, String cmd) {
+	static JsonObject remoteCommand(Minecraft mc, String cmd) {
+		requireRemoteOptIn();
 		String text = remoteCommandText(cmd);
 		var conn = mc.getConnection();
 		if (conn == null) {
 			throw new DevException("not connected to a server");
 		}
+		// sendCommand, as the chat screen sends a typed command. sendUnattendedCommand would open a confirmation
+		// screen instead of sending for every command the server marks restricted (/time, /weather, /tp, /gamemode),
+		// and the harness has nobody to press the button; the opt-in above is the gate.
 		conn.sendCommand(text);
 		JsonObject o = new JsonObject();
 		o.addProperty("cmd", text);

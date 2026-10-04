@@ -5,6 +5,7 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import dev.agentcraft.client.dev.DevBridge;
 import dev.agentcraft.client.dev.DevBridge.DevException;
+import dev.agentcraft.client.dev.DevCommands;
 import dev.agentcraft.client.dev.Fields;
 import dev.agentcraft.client.mp.Studios;
 import dev.agentcraft.layout.Anchors;
@@ -65,7 +66,8 @@ public final class MpDevCommands {
 		}
 		DevBridge.register("dev.mp.send", 10_000,
 			"{payload: public_state|studio_event|world_intent|hello, state?|event?|intent?|protocol+modVersion}"
-				+ " - send one C2S payload through the real codec (a malformed request is refused here); remote server only",
+				+ " - send one C2S payload through the real codec (a malformed request is refused here);"
+				+ " remote server only (needs AGENTCRAFT_DEV_REMOTE=1)",
 			(req, mc) -> {
 				CustomPacketPayload packet = parseSend(Fields.of(req));
 				return DevBridge.onClient(mc, () -> send(mc, packet));
@@ -122,11 +124,17 @@ public final class MpDevCommands {
 
 	// ------------------------------------------------------------------ handlers
 
-	private static JsonObject send(Minecraft mc, CustomPacketPayload packet) {
-		if (mc.getSingleplayerServer() != null) {
+	/** {@code dev.mp.send} never sends in singleplayer, and on a remote server only with the remote opt-in. */
+	public static void checkSend(boolean singleplayer) {
+		if (singleplayer) {
 			// The integrated server accepts the payload's receiver, but singleplayer takes no multiplayer path.
 			throw new DevException("dev.mp.send needs a remote server; singleplayer takes no multiplayer path");
 		}
+		DevCommands.requireRemoteOptIn();
+	}
+
+	private static JsonObject send(Minecraft mc, CustomPacketPayload packet) {
+		checkSend(mc.getSingleplayerServer() != null);
 		if (mc.getConnection() == null) {
 			throw new DevException("dev.mp.send needs a connection to a server");
 		}
