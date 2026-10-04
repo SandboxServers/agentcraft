@@ -4,7 +4,7 @@ import groovy.json.JsonOutput
 gradle.projectsEvaluated {
     def p = gradle.rootProject
     p.tasks.register('mpExportLaunch') {
-        dependsOn 'classes', 'clientClasses', 'configureLaunch'
+        dependsOn 'classes', 'clientClasses', 'configureClientLaunch'
         notCompatibleWithConfigurationCache('exports live Loom run task providers')
         doLast {
             def launches = [:]

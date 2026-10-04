@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -9,7 +10,7 @@ export function gradleInvocation(root, output, command, platform = process.platf
   const args = ['-I', path.join(root, 'tools', 'lib', 'mp', 'export-launch.gradle'),
     'mpExportLaunch', `-PmpLaunchFile=${output}`, '--no-configuration-cache', '--console=plain'];
   if (command) return { command, args, cwd: path.join(root, 'mod') };
-  if (platform === 'win32') return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command',
+  if (platform === 'win32') return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
     `& .\\gradlew.bat ${args.map(psQuote).join(' ')}; exit $LASTEXITCODE`], cwd: path.join(root, 'mod') };
   return { command: 'sh', args: ['./gradlew', ...args], cwd: path.join(root, 'mod') };
 }
@@ -70,8 +71,7 @@ export function seedGameDirs(plan) {
     const options = path.join(client.gameDir, 'options.txt');
     if (!fs.existsSync(options)) {
       const template = fs.readFileSync(path.join(plan.root, 'mod', 'run-template', 'options.txt'), 'utf8');
-      fs.writeFileSync(options, template.replace('renderDistance:16', 'renderDistance:6')
-        .replace('simulationDistance:10', 'simulationDistance:4').replace('maxFps:120', 'maxFps:30'));
+      fs.writeFileSync(options, template.replace('maxFps:120', 'maxFps:30'));
     }
   }
 }
@@ -82,4 +82,17 @@ export function offlineUuid(username) {
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const h = bytes.toString('hex');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+export function gradleEnvironment(root, env = process.env) {
+  return { ...env, GRADLE_USER_HOME: env.GRADLE_USER_HOME || path.join(root, '.gradle-home') };
+}
+
+export function requireJava25(env = process.env, platform = process.platform, run = spawnSync) {
+  const java = env.JAVA_HOME ? path.join(env.JAVA_HOME, 'bin', platform === 'win32' ? 'java.exe' : 'java') : 'java';
+  const result = run(java, ['-version'], { env, encoding: 'utf8', windowsHide: true });
+  if (result.error || result.status !== 0 || !/version "25(?:[.\"+-])/.test(`${result.stderr}\n${result.stdout}`)) {
+    throw new Error(`Java 25 is required; set JAVA_HOME to a JDK 25 installation (${result.error?.message ?? result.stderr?.trim() ?? 'java -version failed'})`);
+  }
+  return java;
 }

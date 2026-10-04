@@ -15,17 +15,18 @@ export function saveJson(file, value) {
   fs.renameSync(tmp, file);
 }
 
-function powershell(root, script) {
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    `. ${psQuote(path.join(root, 'tools', 'lib', 'procs.ps1'))}; ${script}`], { encoding: 'utf8', windowsHide: true });
+export function powershell(root, script, run = spawnSync, options = {}) {
+  const result = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+    `. ${psQuote(path.join(root, 'tools', 'lib', 'procs.ps1'))}; ${script}`], { encoding: 'utf8', windowsHide: true, ...options });
   if (result.error || result.status !== 0) throw new Error(`process inspection failed: ${result.error?.message ?? result.stderr}`);
   return result.stdout.trim();
 }
 
-export function processStamp(pid, root) {
+export function processStamp(pid, root, { platform = process.platform, run = spawnSync } = {}) {
   if (!Number.isInteger(pid) || pid < 1) return null;
-  if (process.platform === 'win32') return powershell(root, `Get-ProcStart ${pid}`) || null;
-  const result = spawnSync('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'stat='], { encoding: 'utf8' });
+  if (platform === 'win32') return powershell(root, `Get-ProcStart ${pid}`, run) || null;
+  const result = run('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'stat='],
+    { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
   if (result.error) throw result.error;
   if (result.status === 1) return null;
   if (result.status !== 0) throw new Error(`ps failed: ${result.stderr}`);
@@ -76,74 +77,77 @@ export function recoverProcesses(entry, root, inventory = processInventory(root)
   return found;
 }
 
-export async function startProcess(spec, entry, state, persist) {
+export async function startProcess(spec, entry, state, persist, { platform = process.platform, shell = powershell, stamp = processStamp, timeoutMs = 20_000 } = {}) {
   entry.executable = spec.command;
   persist();
   fs.mkdirSync(path.dirname(spec.log), { recursive: true });
   let child;
   let error;
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
+    // Start-Bg uses ShellExecute and gives bgrun a hidden console, unlike detached spawn.
     const specFile = path.join(state.dir, `${entry.marker}.json`);
-    entry.statusFile = `${specFile}.status`;
-    // bgrun inherits the environment. Persist overrides only, never inherited credentials.
     const env = Object.fromEntries(Object.entries(spec.env ?? {}).filter(([key, value]) => process.env[key] !== value));
-    saveJson(specFile, { ...spec, env, statusFile: entry.statusFile });
-    child = spawn(process.execPath, [path.join(state.root, 'tools', 'lib', 'bgrun.mjs'), specFile],
-      { detached: true, windowsHide: true, stdio: 'ignore' });
-  } else {
-    const fd = fs.openSync(spec.log, 'a');
-    try { child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env,
-      detached: true, stdio: ['ignore', fd, fd] }); }
-    finally { fs.closeSync(fd); }
+    saveJson(specFile, { ...spec, env });
+    const result = JSON.parse(shell(state.root, `$s = Read-JsonFile ${psQuote(specFile)}; ` +
+      `$e = @{}; if ($s.env) { $s.env.PSObject.Properties | ForEach-Object { $e[$_.Name] = [string]$_.Value } }; ` +
+      `$L = @{Run=${psQuote(state.dir)}; Tools=${psQuote(path.join(state.root, 'tools'))}}; ` +
+      `Start-Bg -L $L -NodeExe ${psQuote(process.execPath)} -Name ${psQuote(entry.marker)} ` +
+      `-Command $s.command -Arguments @($s.args) -Cwd $s.cwd -Log $s.log -ErrLog '' -Env $e | ConvertTo-Json -Compress`,
+      undefined, { timeout: Math.max(1, Math.ceil(timeoutMs)) }));
+    entry.wrapper = { pid: result.wrapperPid, startTime: result.wrapperStart };
+    entry.pid = result.pid; entry.startTime = result.start;
+    persist();
+    if (!sameProcess(entry, state.root, stamp)) throw new Error(`${entry.kind} exited during launch; see ${spec.log}`);
+    return entry;
   }
+  const fd = fs.openSync(spec.log, 'a');
+  try { child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env,
+    detached: true, stdio: ['ignore', fd, fd] }); }
+  finally { fs.closeSync(fd); }
+
   child.once('error', e => { error = e; });
-  if (process.platform === 'win32') entry.wrapper = { pid: child.pid, startTime: processStamp(child.pid, state.root) };
-  else { entry.pid = child.pid; entry.groupPid = child.pid; entry.startTime = processStamp(child.pid, state.root); }
+  entry.pid = child.pid; entry.groupPid = child.pid; entry.startTime = stamp(child.pid, state.root);
   persist();
   child.unref();
-  if (process.platform === 'win32') {
-    for (let i = 0; i < 100; i++) {
-      const status = readJson(entry.statusFile);
-      if (status?.error) throw new Error(status.error);
-      if (status?.childPid) {
-        entry.pid = status.childPid; entry.startTime = processStamp(entry.pid, state.root);
-        break;
-      }
-      if (error || !sameProcess(entry.wrapper, state.root)) break;
-      await sleep(100);
-    }
-  } else await sleep(25); // let asynchronous spawn errors arrive
+  await sleep(25); // let asynchronous spawn errors arrive
+
   persist();
   if (error) throw error;
-  if (!sameProcess(entry, state.root)) throw new Error(`${entry.kind} exited during launch; see ${spec.log}`);
+  if (!sameProcess(entry, state.root, stamp)) throw new Error(`${entry.kind} exited during launch; see ${spec.log}`);
   return entry;
 }
 
-export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRecord = record, persist = () => {} } = {}) {
-  if (!sameProcess(record, root)) return;
-  const members = process.platform !== 'win32' && record.groupPid === record.pid
-    ? groupSnapshot(record, processInventory(root), root) : [record];
+export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRecord = record, persist = () => {}, kind,
+  platform = process.platform, shell = powershell, stamp = processStamp, now = Date.now, delay = sleep,
+  inventory = processInventory, kill = process.kill.bind(process), budgetMs = Infinity } = {}) {
+  const deadline = now() + budgetMs;
+  if (!sameProcess(record, root, stamp)) return;
+  const members = platform !== 'win32' && record.groupPid === record.pid
+    ? groupSnapshot(record, inventory(root), root, stamp) : [record];
   record.members = members.filter(member => member.pid !== record.pid);
   persist(); // retain child identities even if the group leader exits or down crashes
-  if (process.platform === 'win32') {
-    if (sameProcess(consoleRecord, root)) powershell(root, `Send-CtrlBreak ${consoleRecord.pid} | Out-Null`);
+  if (platform === 'win32') {
+    // Java treats Ctrl+Break as a thread dump, not a graceful shutdown.
+    if (kind === 'foreman' && sameProcess(consoleRecord, root, stamp)) {
+      if (shell(root, `Send-CtrlBreak ${consoleRecord.pid}`).toLowerCase() !== 'true') timeoutMs = 0;
+    } else if (kind !== 'client') timeoutMs = 0;
   } else {
     // Direct POSIX launches own a detached group. Signal its tools too, while the leader's
     // PID/start identity still matches, then retain member identities across leader exit.
-    try { process.kill(record.groupPid === record.pid ? -record.pid : record.pid, 'SIGTERM'); }
+    try { kill(record.groupPid === record.pid ? -record.pid : record.pid, 'SIGTERM'); }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
   }
-  const until = Date.now() + timeoutMs;
-  while (Date.now() < until && members.some(member => sameProcess(member, root))) await sleep(100);
-  for (const member of members.filter(member => sameProcess(member, root))) {
-    if (process.platform === 'win32') powershell(root, `Stop-OwnTree ${member.pid} ${psQuote(member.startTime)} | Out-Null`);
+  const until = Math.min(deadline, now() + timeoutMs);
+  while (now() < until && members.some(member => sameProcess(member, root, stamp))) await delay(Math.min(100, Math.max(0, deadline - now())));
+  for (const member of members.filter(member => sameProcess(member, root, stamp))) {
+    if (platform === 'win32') shell(root, `Stop-OwnTree ${member.pid} ${psQuote(member.startTime)} | Out-Null`);
     else {
-      try { process.kill(member.pid, 'SIGKILL'); }
+      try { kill(member.pid, 'SIGKILL'); }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
     }
   }
-  for (let i = 0; i < 50 && members.some(member => sameProcess(member, root)); i++) await sleep(100);
-  const left = members.filter(member => sameProcess(member, root));
+  for (let i = 0; i < 50 && now() < deadline && members.some(member => sameProcess(member, root, stamp)); i++) await delay(Math.min(100, Math.max(0, deadline - now())));
+  const left = members.filter(member => sameProcess(member, root, stamp));
   if (left.length) throw new Error(`processes ${left.map(member => member.pid).join(', ')} are still running`);
 }
 

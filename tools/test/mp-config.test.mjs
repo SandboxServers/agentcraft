@@ -20,12 +20,15 @@ test('packet 92 uses the frozen port block, defaults to two isolated clients', (
 
 test('one client, configurable heaps, environment precedence and explicit home/profile', () => {
   const opt = parseOptions(['up', '--slot', '92', '--clients', '1', '--client-heap', '3G',
-    '--home', './fixture/home', '--profile', 'mp-92'], root,
+    '--home', './fixture/home', '--profile', 'mp-custom'], root,
   { AGENTCRAFT_MP_CLIENT_HEAP: '4G', AGENTCRAFT_MP_SERVER_HEAP: '1024M', AGENTCRAFT_MP_GRADLE: 'gw-raw' });
   assert.equal(opt['client-heap'], '3G');
   assert.equal(opt['server-heap'], '1024M');
   assert.equal(opt['gradle-command'], 'gw-raw');
-  assert.equal(makePlan(root, opt).clients.length, 1);
+  const plan = makePlan(root, opt);
+  assert.equal(plan.clients.length, 1);
+  assert.equal(plan.home, path.resolve('fixture/home'));
+  assert.equal(plan.clients[0].profile, 'mp-custom-a');
 });
 
 test('strict CLI validation prevents accidental defaults and unbounded JVMs', () => {
@@ -57,6 +60,7 @@ test('direct launch preserves Loom flags and replaces heap and singleton game ar
   const client = { username: 'MP92_A', gameDir: '/new game' };
   const args = javaArguments(launch, '2G', client, 25692, 'darwin');
   assert.deepEqual(args.filter(a => a.startsWith('-Xm')), ['-Xms256M', '-Xmx2G']);
+  assert.equal(args.some(arg => /^-XX:(Initial|Max)HeapSize=/.test(arg)), false);
   assert.ok(args.includes('-XstartOnFirstThread'));
   assert.equal(args[args.indexOf('-cp') + 1], '/one:/two');
   assert.equal(args[args.indexOf('--gameDir') + 1], client.gameDir);

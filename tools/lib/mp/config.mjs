@@ -48,9 +48,9 @@ export function makePlan(root, opt) {
   const dir = path.join(root, 'artifacts', 'run', `mp-${opt.slot}`);
   return { version: 1, slot: opt.slot, root, dir, file: path.join(dir, 'state.json'),
     home: opt.home, profile: opt.profile, backend: opt.backend,
-    server: { port: ports.server, heap: opt['server-heap'], gameDir: path.join(dir, 'server'), log: path.join(dir, 'server.log') },
+    server: { port: ports.server, heap: opt['server-heap'], gameDir: path.join(dir, 'server'), log: path.join(dir, 'server.log'), debugLog: path.join(dir, 'server', 'logs', 'debug.log') },
     clients: ['a', 'b'].slice(0, opt.clients).map(id => ({ id, username: `MP${opt.slot}_${id.toUpperCase()}`,
       profile: `${opt.profile}-${id}`, foremanPort: ports[id].foreman, devPort: ports[id].dev,
       heap: opt['client-heap'], gameDir: path.join(dir, `client-${id}`),
-      log: path.join(dir, `client-${id}.log`), foremanLog: path.join(dir, `foreman-${id}.log`) })) };
+      debugLog: path.join(dir, `client-${id}`, 'logs', 'debug.log'), log: path.join(dir, `client-${id}.log`), foremanLog: path.join(dir, `foreman-${id}.log`) })) };
 }

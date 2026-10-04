@@ -21,7 +21,7 @@ test('crash recovery finds only the durable unique marker and captures identity 
   const entry = { marker, executable: 'java', kind: 'client', pid: 42, startTime: 'old-start', wrapper: { pid: 40, startTime: 'wrapper' } };
   const inventory = [{ pid: 42, command: 'unrelated Java' }, { pid: 44, command: `java -Dagentcraft.mp.run=${marker} @args` },
     { pid: 45, command: `grep -Dagentcraft.mp.run=${marker}` },
-    { pid: 46, command: `${process.execPath} tools/lib/bgrun.mjs /run/${marker}.json` }];
+    { pid: 46, command: `${process.execPath} ${path.join('tools', 'lib', 'bgrun.mjs')} ${path.join('run', `${marker}.json`)}` }];
   const stamp = pid => ({ 40: 'wrapper', 42: 'new-start', 44: 'game-start', 46: 'wrapper-start' })[pid] ?? null;
   assert.deepEqual(recoverProcesses(entry, '', inventory, stamp), [entry.wrapper,
     { pid: 44, startTime: 'game-start', role: 'primary' }, { pid: 46, startTime: 'wrapper-start', role: 'wrapper' }]);

@@ -49,18 +49,18 @@ test('wait readiness requires every configured client and supports a one-client 
 test('server telemetry reads complete lines with offsets and filters event names', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-log-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const local = { server: { log: path.join(dir, 'server.log') } };
+  const local = { server: { debugLog: path.join(dir, 'debug.log') } };
   assert.deepEqual(readServerEvents(local), { events: [], offset: 0 });
-  fs.writeFileSync(local.server.log, '[INFO] normal\n[INFO] event=plot_allocated player=uuid index=1\n[INFO] event=hello_sent');
+  fs.writeFileSync(local.server.debugLog, '[INFO] normal\n[INFO] event=plot_allocated player=uuid index=1\n[INFO] event=hello_sent');
   const first = readServerEvents(local);
   assert.equal(first.events.length, 1);
   assert.deepEqual(first.events[0].fields, { event: 'plot_allocated', player: 'uuid', index: '1' });
-  fs.appendFileSync(local.server.log, ' protocol=1\n');
+  fs.appendFileSync(local.server.debugLog, ' protocol=1\n');
   const next = readServerEvents(local, { offset: first.offset, event: 'hello_sent' });
   assert.equal(next.events.length, 1);
   assert.equal(next.events[0].fields.protocol, '1');
   assert.equal(readServerEvents(local, { offset: next.offset }).events.length, 0);
-  fs.writeFileSync(local.server.log, 'event=presence online=false\n');
+  fs.writeFileSync(local.server.debugLog, 'event=presence online=false\n');
   assert.equal(readServerEvents(local, { offset: next.offset }).events[0].event, 'presence');
 });
 
@@ -68,7 +68,7 @@ test('seed isolated dirs with loopback server, y64 flat world, enabled mode and 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-seed-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'mod', 'run-template'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'mod', 'run-template', 'options.txt'), 'renderDistance:16\nmaxFps:120\n');
+  fs.writeFileSync(path.join(root, 'mod', 'run-template', 'options.txt'), fs.readFileSync(new URL('../../mod/run-template/options.txt', import.meta.url), 'utf8'));
   const local = makePlan(root, parseOptions(['up', '--slot', '92'], root, {}));
   seedGameDirs(local);
   const properties = fs.readFileSync(path.join(local.server.gameDir, 'server.properties'), 'utf8');
@@ -83,7 +83,7 @@ test('seed isolated dirs with loopback server, y64 flat world, enabled mode and 
   assert.deepEqual(ops.map(op => op.level), [4, 4]);
   for (const client of local.clients) {
     const options = path.join(client.gameDir, 'options.txt');
-    assert.match(fs.readFileSync(options, 'utf8'), /renderDistance:6\nmaxFps:30/);
+    assert.equal(fs.readFileSync(options, 'utf8'), fs.readFileSync(new URL('../../mod/run-template/options.txt', import.meta.url), 'utf8').replace('maxFps:120', 'maxFps:30'));
     fs.writeFileSync(options, 'custom');
     seedGameDirs(local);
     assert.equal(fs.readFileSync(options, 'utf8'), 'custom');
@@ -93,8 +93,8 @@ test('seed isolated dirs with loopback server, y64 flat world, enabled mode and 
 test('long-running server logs are read in bounded chunks, preserving the cursor', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-bounded-log-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const local = { server: { log: path.join(dir, 'server.log') } };
-  fs.writeFileSync(local.server.log, 'event=presence online=true\n'.repeat(500));
+  const local = { server: { debugLog: path.join(dir, 'debug.log') } };
+  fs.writeFileSync(local.server.debugLog, 'event=presence online=true\n'.repeat(500));
   let offset = 0;
   let count = 0;
   do {
@@ -102,9 +102,9 @@ test('long-running server logs are read in bounded chunks, preserving the cursor
     assert.ok(chunk.offset - offset <= 1024);
     offset = chunk.offset;
     count += chunk.events.length;
-  } while (offset < fs.statSync(local.server.log).size);
+  } while (offset < fs.statSync(local.server.debugLog).size);
   assert.equal(count, 500);
-  assert.equal(Buffer.byteLength(readLogTail(local.server.log, 64)), 64);
-  fs.writeFileSync(local.server.log, 'x'.repeat(2048));
+  assert.equal(Buffer.byteLength(readLogTail(local.server.debugLog, 64)), 64);
+  fs.writeFileSync(local.server.debugLog, 'x'.repeat(2048));
   assert.throws(() => readServerEvents(local, { maxBytes: 1024 }), /exceeds/);
 });

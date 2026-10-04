@@ -84,14 +84,13 @@ this checkout's Gradle daemon (never another checkout's).
 
 `mp.mjs` prepares Loom's development launch configuration once, then starts a dedicated
 server, one local Foreman per player, and one or two clients. Requires Node 22.18+, Java 25,
-and `npm ci --prefix tools` / `npm ci --prefix foreman`. Works on macOS, Linux and Windows;
-Windows process control uses the existing PowerShell helpers and background runner.
+and `npm ci --prefix tools` / `npm ci --prefix foreman`. Uses portable macOS, Linux and Windows
+launch paths. Windows process control uses the existing PowerShell helpers and background
+runner; the Windows changes have unit coverage but have not been run on Windows.
 
 ```sh
-node tools/mp.mjs up --slot 92 --clients 1 --backend sim --json
-node tools/mp.mjs status --slot 92 --json
-node tools/mp.mjs down --slot 92 --json
 node tools/mp.mjs up --slot 92 --clients 2 --backend sim --json
+node tools/mp.mjs status --slot 92 --json
 node tools/mp.mjs down --slot 92 --json
 ```
 
@@ -112,15 +111,22 @@ client profiles append `-a` / `-b`. Never use a shared home/profile with another
 Each JVM has an explicit `-Xms256M` and a **2G maximum heap**, independently configurable
 with `--server-heap` / `--client-heap` or `AGENTCRAFT_MP_SERVER_HEAP` /
 `AGENTCRAFT_MP_CLIENT_HEAP` (flag wins; accepted range 256M..8G). Native memory and graphics
-use additional RAM. Client defaults also limit render distance to 6 and FPS to 30 in a
-960×540 window. `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS` must be unset
+use additional RAM. Clients use 30 FPS in a 960×540 window and preserve the template
+graphics preset. In Minecraft 26.3, Fancy applies render distance 16 and simulation distance
+12 after loading options; the dedicated server separately limits view distance to 6 and
+simulation distance to 4. The client minimum simulation distance is 5. Existing options
+persist; delete only a generated client directory's `options.txt` to reseed it.
+`JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS` must be unset
 so injected JVM flags cannot override the caps. Gradle's own memory configuration is unchanged.
 
-Gradle preparation inherits `JAVA_HOME` and `GRADLE_USER_HOME`; the portable default is
-`sh ./gradlew` on POSIX or `gradlew.bat` via PowerShell on Windows. Override the executable
+Java 25 is checked before preparation, including with `--no-build`. Gradle preparation
+inherits `JAVA_HOME` and `GRADLE_USER_HOME`; when the latter is unset it uses this checkout's
+`.gradle-home`. The portable default is `sh ./gradlew` on POSIX or `gradlew.bat` via PowerShell on Windows. Override the executable
 with `--gradle-command` or `AGENTCRAFT_MP_GRADLE`. `--no-build` reuses this slot's previously
 exported metadata; export again after changing code, Java/Loom settings or platforms.
-The init script reads Loom's real task classpaths, JVM arguments and DLI configuration
+The init script depends on Loom 1.18.2's `configureClientLaunch` (including `downloadAssets`
+and platform natives when needed), then reads Loom's real task classpaths, JVM arguments
+and DLI configuration
 without running `runClient` / `runServer` or editing `mod/build.gradle`. Direct client
 launches use separate working directories and `--gameDir`, preserving Loom's native/asset
 configuration. Java argfiles keep Windows command lines short.
@@ -138,32 +144,63 @@ require their campaign packets to land.
 every client's `dev.state` to show a loaded remote world, the expected player and its own
 synced Foreman. Before MP-12, remote means `world.name === null` plus a loaded dimension;
 it does not imply that the server has sent the multiplayer hello.
+
+The library scans each client stdout log from the beginning for terminal DevBridge errors.
+`up` handles a bind failure by stopping only that client, waiting 35 seconds on macOS or
+65 seconds on Linux for TIME_WAIT, and relaunching it once. Windows uses no cooldown
+(unverified). It prints the client, port, cause and log path with the recovery notice.
+The retry shares the readiness stage's `--timeout` budget; insufficient time, a second bind
+failure or a non-bind bridge error fails immediately and triggers rollback. Thus an immediate
+`down` followed by `up` can take longer than a cold start; allow time for this recovery.
+The port preflight uses a TCP connection, because Node's address reuse makes a `listen()`
+probe unreliable for detecting Java's TIME_WAIT bind failures.
 `status --json` includes process identities and the last startup states, dated by
 `statesCapturedAt`; those DevBridge snapshots are historical. Status reports `ready`,
-`partial` or `stopped` from live PID/start-time checks.
+`partial` or `stopped` from live PID/start-time checks. JSON stdout contains one object;
+progress goes to stderr. Success is `{ok:true, ...summary}`; failure is `{ok:false,error}`
+and exits nonzero. Summary version 1 has these fields:
+
+| Fields | Shape |
+|---|---|
+| `version`, `slot`, `phase` | `1`, slot number, `ready` / `partial` / `stopped` |
+| `home`, `profile`, `stateFile` | Strings identifying the run |
+| `error`, `statesCapturedAt` | Last startup error / ISO snapshot timestamp, or `null` |
+| `server` | `port`, `heap`, `gameDir`, stdout `log`, `debugLog`, boolean `running` |
+| `clients[]` | `id`, `username`, `profile`, `foremanPort`, `devPort`, `heap`, `gameDir`, `log`, `debugLog`, `foremanLog`, booleans `running` / `foremanRunning`, last `state` or `null` |
+| `processes[]` | `kind`, `client` (id or `null`), `log`, recorded `pid` (or `null`), `primaryRunning`, live `processes[]` |
+| `processes[].processes[]` | Only `pid`, `startTime`, `role` (`primary`, `wrapper`, `member`) |
+
+A stopped run can retain historical states and process entries; each live process list is empty.
 
 Always run `down`, including after a failed `up`. It stops only recorded PID/start-time
 identities, can recover a launcher crash using unique per-process launch markers, and
 never kills shared Gradle daemons or foreign port owners. It asks an owned DevBridge to
 quit, then signals the clients, Foremen and dedicated server, with bounded waits and a
-force-stop fallback. Incomplete cleanup retains the records and returns an error so
-`down` can be retried. A stale launcher control lock is recoverable too. Process-table
-access is required: a sandbox denying `ps` or PowerShell inspection fails before launch.
+force-stop fallback. On Windows only Foremen receive Ctrl+Break; clients get their
+post-`dev.quit` wait, and the dedicated server is terminated without a final save. Server
+changes since its last autosave can be lost on Windows. Incomplete cleanup retains the
+records and returns an error so
+`down` can be retried. One controller can recover a stale launcher control lock. Do not
+run concurrent `up`/`down` controllers on a slot: concurrent stale-lock takeover has a known
+race (F7) awaiting a fenced locking design. Process-table access is required: a sandbox denying `ps` or PowerShell inspection fails before launch.
 
 Later packets can import the harness helpers:
 
 ```js
-import { clientCommand, waitForClients, readServerEvents } from './lib/mp/index.mjs';
+import { clientCommand, waitForClients, readServerEvents, readClientEvents } from './lib/mp/index.mjs';
 // plan = the parsed state.json or CLI JSON summary (same server/client fields).
 const states = await waitForClients(plan);
 await clientCommand(plan, 'a', 'dev.camera', { anchor: 'cam_room' });
 await clientCommand(plan, 'b', 'dev.state');
 let { events, offset } = readServerEvents(plan, { event: 'hello_sent' });
 ({ events, offset } = readServerEvents(plan, { offset }));
+const clientEvents = readClientEvents(plan, 'a'); // retain a separate offset per file
 ```
 
-`readServerEvents` returns complete telemetry lines, parsed fields and a byte offset for
-incremental reads. `clientCommand` uses the existing `DevClient`, with bounded connection
+`readServerEvents` and `readClientEvents` read each game directory's `logs/debug.log`,
+including DEBUG-level telemetry. They return complete telemetry lines, parsed fields and
+a byte offset for incremental reads. Stdout captures remain the startup/error logs.
+`clientCommand` uses the existing `DevClient`, with bounded connection
 and command timeouts, and always closes its connection. Run `npm test --prefix tools`
 for port/CLI, launch isolation, memory caps, PID recovery, cleanup and library checks.
 
