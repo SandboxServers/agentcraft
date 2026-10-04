@@ -6,6 +6,7 @@ import static dev.agentcraft.mp.relay.StudioRelayAcceptTest.agent;
 import static dev.agentcraft.mp.relay.StudioRelayAcceptTest.fakeDir;
 import static dev.agentcraft.mp.relay.StudioRelayAcceptTest.minimalState;
 import static dev.agentcraft.mp.relay.StudioRelayAcceptTest.policy;
+import static dev.agentcraft.mp.relay.StudioRelayAcceptTest.send;
 import static dev.agentcraft.mp.relay.StudioRelayAcceptTest.state;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -146,6 +147,28 @@ class StudioRelayTelemetryTest {
                 + " player=" + OWNER + " studio=" + OWNER + " plot=1"
                 + " reason=" + MpReasons.RATE_LIMITED;
             assertLine(capture.lines(), expected);
+        }
+    }
+
+    @Test
+    void flood_of_refusals_logs_one_line_per_sender_and_reason_per_window() {
+        var prefix = "event=" + MpEvents.PUBLIC_STATE_REJECTED
+            + " player=" + STRANGER + " studio=" + STRANGER;
+        var noPlot = prefix + " rev=1 reason=" + MpReasons.NO_PLOT;
+        try (var capture = MpLog.capture()) {
+            // 1,000 states in one second from a sender without a plot.
+            for (int i = 0; i < 1000; i++) send(STRANGER, i * 1_000_000L);
+            assertEquals(List.of(noPlot, prefix + " plot=-1 rev=1 reason="
+                + MpReasons.RATE_LIMITED), capture.lines());
+            // A second sender has its own bucket and its own line.
+            assertEquals(StudioRelay.StateResult.NO_PLOT,
+                send(UUID.randomUUID(), 999_000_000L));
+            assertEquals(3, capture.lines().size());
+            // The reason is logged again after five seconds, not before.
+            send(STRANGER, StudioRelay.WINDOW_NANOS - 1);
+            assertEquals(3, capture.lines().size());
+            send(STRANGER, StudioRelay.WINDOW_NANOS);
+            assertEquals(noPlot, capture.lines().get(3));
         }
     }
 

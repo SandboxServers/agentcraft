@@ -59,7 +59,8 @@ public final class RelayFeature {
             }));
 
         ServerPlayNetworking.registerGlobalReceiver(PublicStateC2S.TYPE,
-            (payload, context) -> context.server().execute(() -> {
+            (payload, context) -> {
+                // Fabric calls a play receiver on the server thread: no hop.
                 MinecraftServer server = context.server();
                 if (!active(server)) return;
                 // Accepts and relays only a changed state; UNCHANGED re-stores
@@ -69,10 +70,10 @@ public final class RelayFeature {
                     Plots.directory(), MpServerConfig.current(),
                     MpPayloads.isModEquipped(context.player().getUUID()),
                     System.nanoTime(), viewers(server), sink(server));
-            }));
+            });
 
         ServerPlayNetworking.registerGlobalReceiver(StudioEventC2S.TYPE,
-            (payload, context) -> context.server().execute(() -> {
+            (payload, context) -> {
                 MinecraftServer server = context.server();
                 if (!active(server)) return;
                 var result = StudioRelay.acceptEvent(
@@ -84,7 +85,7 @@ public final class RelayFeature {
                     StudioRelay.relayEvent(viewers(server), sink(server),
                         StudioId.of(context.player().getUUID()), payload.event(),
                         Plots.directory());
-            }));
+            });
 
         ServerLifecycleEvents.SERVER_STOPPED.register(
             server -> StudioRelay.reset());
