@@ -12,12 +12,14 @@ import dev.agentcraft.client.foreman.Protocol.Decision;
 import dev.agentcraft.client.foreman.Protocol.DecisionKind;
 import dev.agentcraft.client.foreman.Protocol.LogEntry;
 import dev.agentcraft.client.foreman.Protocol.Task;
+import dev.agentcraft.client.mp.Studios;
 import dev.agentcraft.client.mp.StudioView;
 import dev.agentcraft.client.mp.visitor.VisitorGate;
 import dev.agentcraft.client.ui.Kit;
 import dev.agentcraft.client.ui.Panels;
 import dev.agentcraft.client.ui.TextUtil;
 import dev.agentcraft.client.ui.UiStyle;
+import dev.agentcraft.mp.StudioId;
 import dev.agentcraft.mp.state.PublicAgent;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -74,9 +76,8 @@ public final class AgentCardScreen extends Screen {
 	}
 
 	private final String agentId;
-	/** Non-null in visitor mode: the remote studio and public agent the read-only card shows. */
-	private final @Nullable StudioView visitorStudio;
-	private final @Nullable PublicAgent visitorAgent;
+	/** Non-null in visitor mode: the remote studio whose current public state the card follows. */
+	private final @Nullable StudioId visitorStudioId;
 	private int x0;
 	private int y0;
 	private int h;
@@ -126,24 +127,26 @@ public final class AgentCardScreen extends Screen {
 	}
 
 	public AgentCardScreen(String agentId) {
-		this(agentId, null, null);
+		this(agentId, null);
 	}
 
 	/**
-	 * Read-only card for an agent in someone else's studio (MP-11). It draws only
-	 * {@link PublicAgent} fields and never reads {@code Foreman.state()}; the message box and the
-	 * pause/stop/resume actions are absent, so it cannot reach the viewer's own Foreman.
+	 * Read-only card for an agent in someone else's studio (MP-11). It keeps only the studio id and
+	 * the agent id: every frame it resolves the studio through {@link Studios#view} and the agent
+	 * from that view's current public state, so a state update reaches the card and it closes when
+	 * the studio, its state or the agent is gone. It draws only {@link PublicAgent} fields and never
+	 * reads {@code Foreman.state()}; the message box and the pause/stop/resume actions are absent, so
+	 * it cannot reach the viewer's own Foreman.
 	 */
 	public AgentCardScreen(StudioView studio, PublicAgent agent) {
-		this(agent.id(), studio, agent);
+		this(agent.id(), studio.id());
 	}
 
-	private AgentCardScreen(String agentId, @Nullable StudioView studio, @Nullable PublicAgent agent) {
+	private AgentCardScreen(String agentId, @Nullable StudioId visitorStudioId) {
 		super(Component.literal("Agent"));
 		this.agentId = agentId;
-		this.visitorStudio = studio;
-		this.visitorAgent = agent;
-		if (studio == null) {
+		this.visitorStudioId = visitorStudioId;
+		if (visitorStudioId == null) {
 			lastAgent = agentId;
 		}
 	}
@@ -154,7 +157,12 @@ public final class AgentCardScreen extends Screen {
 
 	/** True when this is the read-only remote card (MP-11), not the viewer's own card. */
 	public boolean visitorMode() {
-		return visitorAgent != null;
+		return visitorStudioId != null;
+	}
+
+	/** The remote studio this card follows, resolved fresh from the registry on every call. */
+	private @Nullable StudioView visitorView() {
+		return visitorStudioId == null ? null : Studios.view(visitorStudioId).orElse(null);
 	}
 
 	/** The message line's text, or null when it is closed (QA). */
@@ -183,7 +191,8 @@ public final class AgentCardScreen extends Screen {
 	@Override
 	protected void init() {
 		if (visitorMode()) {
-			layoutVisitor();
+			StudioView view = visitorView();
+			layoutVisitor(view, VisitorGate.findAgent(view, agentId).orElse(null));
 			return;
 		}
 		layout();
@@ -192,7 +201,8 @@ public final class AgentCardScreen extends Screen {
 	@Override
 	protected void repositionElements() {
 		if (visitorMode()) {
-			layoutVisitor();
+			StudioView view = visitorView();
+			layoutVisitor(view, VisitorGate.findAgent(view, agentId).orElse(null));
 			return;
 		}
 		// window resize: keep the message line (and what was typed), just lay the card out again
@@ -328,7 +338,13 @@ public final class AgentCardScreen extends Screen {
 	@Override
 	public void extractRenderState(GuiGraphicsExtractor g, int mouseX, int mouseY, float a) {
 		if (visitorMode()) {
-			drawVisitor(g);
+			StudioView view = visitorView();
+			PublicAgent publicAgent = VisitorGate.findAgent(view, agentId).orElse(null);
+			if (view == null || view.publicState() == null || publicAgent == null) {
+				onClose(); // the studio, its state or the agent is gone: nothing live to show
+				return;
+			}
+			drawVisitor(g, view, publicAgent);
 			return;
 		}
 		Agent ag = agent();
@@ -496,14 +512,8 @@ public final class AgentCardScreen extends Screen {
 	}
 
 	/** The read-only remote card: public state only, no actions, no Foreman reads. */
-	private void drawVisitor(GuiGraphicsExtractor g) {
-		StudioView studio = visitorStudio;
-		PublicAgent ag = visitorAgent;
-		if (studio == null || ag == null) {
-			onClose();
-			return;
-		}
-		layoutVisitor();
+	private void drawVisitor(GuiGraphicsExtractor g, StudioView studio, PublicAgent ag) {
+		layoutVisitor(studio, ag);
 		Panels.panel(g, x0, y0, W, h);
 		Kit.Padding pp = Kit.padding("panel_paper");
 		int ix = x0 + pp.left();
@@ -533,11 +543,11 @@ public final class AgentCardScreen extends Screen {
 		Panels.text(g, font, esc, ix + iw - font.width(esc), fy, muted);
 	}
 
-	private void layoutVisitor() {
+	private void layoutVisitor(@Nullable StudioView studio, @Nullable PublicAgent ag) {
 		Kit.Padding pp = Kit.padding("panel_paper");
-		int lines = visitorAgent == null || visitorStudio == null
+		int lines = studio == null || ag == null
 			? 1
-			: Math.max(1, VisitorGate.agentLines(visitorAgent, visitorStudio.ownerName()).size());
+			: Math.max(1, VisitorGate.agentLines(ag, studio.ownerName()).size());
 		h = pp.top() + 14 + 14 + 6 + lines * ROW + 12 + 12 + pp.bottom();
 		x0 = (this.width - W) / 2;
 		y0 = Math.max(4, (this.height - h) / 2);

@@ -16,7 +16,6 @@ import dev.agentcraft.client.world.StationInteractions;
 import dev.agentcraft.mp.Plot;
 import dev.agentcraft.mp.StudioId;
 import dev.agentcraft.mp.state.PublicAgent;
-import dev.agentcraft.mp.state.PublicStudioState;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -76,19 +75,20 @@ public final class VisitorFeature {
 		registerDev();
 	}
 
-	/** The gate: consume a remote station click, otherwise let the station's own handler run. */
+	/**
+	 * The gate: consume a remote click, otherwise let the station's own handler run. A remote block
+	 * with a handler but no station mapping is still consumed (fail closed) and opens the generic
+	 * {@link Station#STATION} panel.
+	 */
 	private static boolean before(Player player, BlockPos pos, BlockState state, @Nullable StationBlockEntity be) {
-		Station kind = STATIONS.get(state.getBlock());
-		if (kind == null) {
-			return false;
-		}
 		Optional<StudioView> at = Studios.at(pos);
-		if (VisitorGate.route(at) != Route.VISITOR) {
+		Optional<Station> kind = VisitorGate.visitorKind(at, STATIONS.get(state.getBlock()));
+		if (kind.isEmpty()) {
 			return false;
 		}
 		StudioView studio = at.orElseThrow();
-		VisitorGate.logOpen(kind, studio, player.getUUID());
-		Minecraft.getInstance().gui.setScreen(new VisitorStationScreen(studio.id(), kind));
+		VisitorGate.logOpen(kind.get(), studio, player.getUUID());
+		Minecraft.getInstance().gui.setScreen(new VisitorStationScreen(studio.id(), kind.get()));
 		return true;
 	}
 
@@ -98,30 +98,24 @@ public final class VisitorFeature {
 		if (mc.player == null) {
 			return;
 		}
-		StudioView view = Studios.view(studio.id()).orElse(studio);
-		PublicStudioState state = view.publicState();
-		if (state == null) {
+		// the registry's current view, and only a remote one: the own studio keeps its own card
+		Optional<StudioView> view = Studios.view(studio.id());
+		if (VisitorGate.route(view) != Route.VISITOR) {
 			return;
 		}
-		PublicAgent agent = null;
-		for (PublicAgent a : state.agents()) {
-			if (a.id().equals(agentId)) {
-				agent = a;
-				break;
-			}
-		}
-		if (agent == null) {
+		Optional<PublicAgent> agent = VisitorGate.findAgent(view.get(), agentId);
+		if (agent.isEmpty()) {
 			return;
 		}
-		VisitorGate.logOpen(Station.AGENT, view, mc.player.getUUID());
-		mc.gui.setScreen(new AgentCardScreen(view, agent));
+		VisitorGate.logOpen(Station.AGENT, view.get(), mc.player.getUUID());
+		mc.gui.setScreen(new AgentCardScreen(view.get(), agent.get()));
 	}
 
 	// ------------------------------------------------------------------ dev
 
 	private static void registerDev() {
 		DevBridge.register("dev.visitor.use", 10_000,
-			"{station: podium|merge|task_wall|archive|catalog|lectern|console, studio?: uuid} -> open the read-only visitor panel for a remote studio's station",
+			"{station: podium|merge|task_wall|archive|catalog|lectern|console|station, studio?: uuid} -> open the read-only visitor panel for a remote studio's station",
 			(req, mc) -> {
 				Fields f = Fields.of(req);
 				Station kind = Station.byToken(f.nonBlank("station"));
@@ -146,9 +140,9 @@ public final class VisitorFeature {
 			"{x,y,z} -> run the real UseBlockCallback at a block (the visitor click path) and report the result and screen",
 			(req, mc) -> {
 				Fields f = Fields.of(req);
-				int x = f.optInt("x", 0, -30_000_000, 30_000_000);
-				int y = f.optInt("y", 0, -30_000_000, 30_000_000);
-				int z = f.optInt("z", 0, -30_000_000, 30_000_000);
+				int x = (int) f.integer("x", -30_000_000, 30_000_000);
+				int y = (int) f.integer("y", -30_000_000, 30_000_000);
+				int z = (int) f.integer("z", -30_000_000, 30_000_000);
 				return DevBridge.onClient(mc, () -> {
 					if (mc.player == null || mc.level == null) {
 						throw new DevBridge.DevException("no world");

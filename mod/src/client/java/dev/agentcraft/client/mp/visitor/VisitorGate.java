@@ -33,7 +33,9 @@ public final class VisitorGate {
 
 	/**
 	 * The closed station vocabulary. The tokens are the telemetry values and the dev-command names;
-	 * {@code agent} is the remote agent card. This is the packet's own set, not a contract.
+	 * {@code agent} is the remote agent card and {@code station} is the generic fail-closed kind for
+	 * a remote block that has a handler but no station mapping. This is the packet's own set, not a
+	 * contract.
 	 */
 	public enum Station {
 		PODIUM("podium", "Decision podium"),
@@ -43,7 +45,8 @@ public final class VisitorGate {
 		CATALOG("catalog", "Memory catalog"),
 		LECTERN("lectern", "Memory lectern"),
 		CONSOLE("console", "Console terminal"),
-		AGENT("agent", "Agent");
+		AGENT("agent", "Agent"),
+		STATION("station", "Station");
 
 		private final String token;
 		private final String label;
@@ -84,12 +87,51 @@ public final class VisitorGate {
 	}
 
 	/**
+	 * The gate's decision for a click on a block that already has a handler. Empty means the station
+	 * handler runs (the viewer's own studio, or no studio at the position). Present means the
+	 * read-only panel opens with that kind: the mapped station when the block is one of them,
+	 * otherwise the generic {@link Station#STATION}. That fallback is the fail-closed rule: a remote
+	 * block with a handler and no entry in the map is still consumed, so it can never reach the
+	 * viewer's own feature handler with the remote studio's context.
+	 */
+	public static Optional<Station> visitorKind(Optional<StudioView> studio, @Nullable Station mapped) {
+		if (route(studio) != Route.VISITOR) {
+			return Optional.empty();
+		}
+		return Optional.of(mapped != null ? mapped : Station.STATION);
+	}
+
+	/**
+	 * The agent with this id in the view's current public state, or nothing. The lookup is pure and
+	 * re-resolved from the view every call, so a card follows a state update and closes once the
+	 * state or the agent is gone.
+	 */
+	public static Optional<PublicAgent> findAgent(@Nullable StudioView view, String agentId) {
+		if (view == null) {
+			return Optional.empty();
+		}
+		PublicStudioState state = view.publicState();
+		if (state == null) {
+			return Optional.empty();
+		}
+		for (PublicAgent agent : state.agents()) {
+			if (agent.id().equals(agentId)) {
+				return Optional.of(agent);
+			}
+		}
+		return Optional.empty();
+	}
+
+	/**
 	 * The panel body for a station, from the public state only. Opt-in text is shown only through the
 	 * matching {@code PublicPolicy} flag (the record already refuses it otherwise).
 	 */
 	public static List<String> stationLines(@Nullable PublicStudioState state, Station kind) {
 		if (kind == Station.AGENT) {
 			return List.of();
+		}
+		if (kind == Station.STATION) {
+			return List.of("Nothing public to show here.");
 		}
 		if (state == null) {
 			return List.of("No public state yet.");
@@ -102,6 +144,7 @@ public final class VisitorGate {
 			case ARCHIVE, CATALOG, LECTERN -> List.of("Memory is private to its owner.");
 			case TASK_WALL -> taskWallLines(state);
 			case AGENT -> List.of();
+			case STATION -> List.of("Nothing public to show here.");
 		};
 	}
 

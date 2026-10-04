@@ -53,9 +53,36 @@ class VisitorGateTest {
 		assertEquals(Route.VISITOR, VisitorGate.route(Optional.of(remote(leakyState()))));
 	}
 
+	@Test void agent_lookup_resolves_from_the_current_public_state() {
+		// found: the agent is in the view's current state
+		Optional<PublicAgent> found = VisitorGate.findAgent(remote(leakyState()), "kit");
+		assertTrue(found.isPresent());
+		assertEquals("kit", found.get().id());
+		// no state: nothing to resolve
+		assertTrue(VisitorGate.findAgent(remote(null), "kit").isEmpty());
+		// a state without that agent: nothing to resolve
+		PublicStudioState noAgents = new PublicStudioState(8, true, List.of(), new Counts(1, 2, 3, 4, 5, 6, 2),
+			new GoalSummary(GoalStatusWire.NONE, 0, null), List.of(), PublicPolicy.DEFAULT, null);
+		assertTrue(VisitorGate.findAgent(remote(noAgents), "kit").isEmpty());
+		assertTrue(VisitorGate.findAgent(null, "kit").isEmpty());
+	}
+
+	@Test void the_gate_fails_closed_for_a_remote_block_with_a_handler() {
+		StudioView remote = remote(leakyState());
+		// remote and mapped: the mapped kind
+		assertEquals(Optional.of(Station.PODIUM), VisitorGate.visitorKind(Optional.of(remote), Station.PODIUM));
+		// remote and not mapped: the generic kind, still consumed
+		assertEquals(Optional.of(Station.STATION), VisitorGate.visitorKind(Optional.of(remote), null));
+		// own studio and no studio: today's handler, unchanged
+		assertEquals(Optional.empty(), VisitorGate.visitorKind(Optional.of(own()), Station.PODIUM));
+		assertEquals(Optional.empty(), VisitorGate.visitorKind(Optional.empty(), Station.PODIUM));
+		assertEquals(Optional.empty(), VisitorGate.visitorKind(Optional.empty(), null));
+	}
+
 	@Test void station_lines_use_counts_and_opt_in_titles_only() {
 		PublicStudioState state = leakyState();
-		for (Station kind : List.of(Station.PODIUM, Station.MERGE, Station.ARCHIVE, Station.CATALOG, Station.LECTERN, Station.CONSOLE)) {
+		for (Station kind : List.of(Station.PODIUM, Station.MERGE, Station.ARCHIVE, Station.CATALOG, Station.LECTERN, Station.CONSOLE,
+			Station.STATION)) {
 			String text = String.join("\n", VisitorGate.stationLines(state, kind));
 			assertFalse(text.contains("SECRET-TASK"), "task title leaked into " + kind);
 			assertFalse(text.contains("SECRET-GOAL"), "goal text leaked into " + kind);
@@ -99,11 +126,14 @@ class VisitorGateTest {
 			assertFalse(VisitorGate.logOpen(Route.HANDLER, Station.PODIUM, remote(leakyState()), viewer));
 			VisitorGate.logOpen(Station.PODIUM, studio, viewer);
 			VisitorGate.logOpen(Route.VISITOR, Station.AGENT, studio, viewer);
+			VisitorGate.logOpen(Route.VISITOR, Station.STATION, studio, viewer);
 			assertEquals(List.of(
 				"event=visitor_readonly player=" + viewer + " studio=" + studio.id().owner()
 					+ " plot=-1 rev=7 station=podium action=open",
 				"event=visitor_readonly player=" + viewer + " studio=" + studio.id().owner()
-					+ " plot=-1 rev=7 station=agent action=open"), capture.lines());
+					+ " plot=-1 rev=7 station=agent action=open",
+				"event=visitor_readonly player=" + viewer + " studio=" + studio.id().owner()
+					+ " plot=-1 rev=7 station=station action=open"), capture.lines());
 			assertFalse(capture.lines().toString().contains("SECRET"));
 		}
 		assertEquals("debug", MpEvents.CATALOG.get(MpEvents.VISITOR_READONLY));
