@@ -7,21 +7,20 @@
 
 - **Packet:** MP-F, Foundation; packet number 0.
 - **Base:** `main` @ `b40768d`; branch `mp/MP-F-foundation`.
-- **Machine:** macOS Apple Silicon, Java 25, Node 24.18.0.
-- **Status:** Review. The implementation, the singleplayer QA compare and the live dedicated hello are verified (see "Coordinator verification"). The worker's own live hello attempt below failed in its sandbox; review fixes are pending.
-- No contract fields, defaults, ownership boundaries, or existing caller signatures were changed. No push, PR, colo access, or memory update.
+- **Status:** Review. The implementation and the review fixes are verified by the coordinator: 32 JUnit tests, the singleplayer QA compare, the fake-studio check and the live dedicated hello (see "Coordinator verification"). The worker's original live hello attempt below failed in its sandbox.
+- Review fixes implement coordinator contract amendments A–E. Defaults and legacy caller signatures remain unchanged. No commit, push, PR, colo access, or memory update in the review round.
 
 ## What shipped
 
 | Files | Behavior |
 |---|---|
 | `main/mp/{StudioId,Plot,PlotGrid,PlotDirectory,Plots}` | Immutable studio identity and plot origins; square spiral, inverse footprint lookup, default LOCAL plot 0 directory. Site containment includes boundary block coordinates. |
-| `main/mp/state/*` | Exact public record allowlist, lower-case validated wire enums, all-false public policy, immutable collections, strict bounded/sanitized `PublicJson` readers for state, events and intents. |
+| `main/mp/state/*` | Exact public record allowlist, lower-case validated wire enums, all-false public policy, immutable collections, strict bounded/sanitized `PublicJson` readers for state, events and intents; `none` goal status, closed lamp bindings and outbound state validation. |
 | `main/mp/net/*` | Protocol 1, all ten payload records/codecs and one-time play-phase registration. Dedicated/enabled/can-send-gated hello; connection UUID attribution and compatible-client marker, removed on disconnect/server stop. |
-| `main/mp/{MpServerConfig,MpLog,MpEvents,MpReasons}` | Dedicated-only config load, exact default values, WARN/default invalid-value behavior; full telemetry catalog and scoped capture hook. |
+| `main/mp/{MpServerConfig,MpLog,MpEvents,MpReasons}` | Dedicated-only config load, reversible `install` override, exact default values, WARN/default invalid-value behavior; full telemetry catalog and scoped capture hook. |
 | `main/layout/Anchors.java` | Per-studio immutable snapshots and listeners; self-relative legacy API, unchanged LOCAL disk file and saved revision behavior; builder origin translates all anchor paths and bounds. |
 | `main/hq/HqBuilder.java` | `Options(force, origin, studio)` and retained `Options(force)` constructor; defaults ZERO/LOCAL. Builders still ignore options until MP-02. |
-| `client/mp/{StudioView,Studios,MpMode}` | Own/remote registry, plot-first/layout-fallback lookup, overlay seam, state/event listeners, stable non-reused slots per connection; gated hello, 100-tick no-hello timeout, disconnect reset, address-hash telemetry and REMOTE_VANILLA HUD indicator. |
+| `client/mp/{StudioView,Studios,MpMode}` | Own/remote registry, plot-first/layout-fallback lookup, overlay seam, state/event listeners, stable non-reused slots per connection; gated hello, 100-tick no-hello timeout, client-executor disconnect reset, retained server info and registered plots, process-salted address-hash telemetry and REMOTE_VANILLA HUD indicator. |
 | `client/mp/dev/MpDevFake.java` | `dev.mp.fake` state/event/clear and `dev.mp.studios`; typed Fields access, shared registry listeners, default overlay, no Foreman or network mutation. |
 | Six common and four client F-stubs | Each initially has an empty `init()`; all wired once in `AgentCraft`/`ClientFeatures`. |
 | `mod/build.gradle`, `mod/src/test/java/dev/agentcraft/mp/*` | Isolated JUnit 5 setup, including client contract testing. No game-test source-set edits. Frozen public-record shape, identity-free C2S, exact-cap opt-in acceptance, codec, caps, malformed-input, sanitization, plot, config, anchor, registry, hello, telemetry, dev overlay and wiring tests. |
@@ -29,16 +28,18 @@
 ## APIs and implementation details for later packets
 
 - `MpPayloads.register()` uses the **26.3 Fabric names** `PayloadTypeRegistry.serverboundPlay()` / `clientboundPlay()`. The old `playC2S` / `playS2C` spelling does not exist. Actual signatures were checked in the installed Fabric jar; Minecraft signatures were checked in the provided read-only mcsrc. No source generation ran.
-- Payload identifiers are snake case, e.g. `agentcraft:hello_s2c`, `agentcraft:public_state_c2s`, `agentcraft:world_intent_c2s`; each record exposes `TYPE` and `CODEC`. `HelloS2C.serverInfo()` contains `ServerInfo`.
+- Payload identifiers are snake case, e.g. `agentcraft:hello_s2c`, `agentcraft:public_state_c2s`, `agentcraft:world_intent_c2s`; each record exposes `TYPE` and `CODEC`. `ServerInfo(int plotStride, int relayRadiusChunks, int publicStatePerSecond, int intentsPerSecond)` is preserved by `MpMode.serverInfo(): Optional<ServerInfo>` after acceptance and cleared on join/reset/disconnect. `Studios.plot(StudioId): Optional<Plot>` exposes registered plots; it is empty for a hello index of −1. Rates decode in 1..1000. `HelloC2S.forCurrentVersion(String)` bounds/sanitizes the local version before replying.
 - Public state/event/intent codecs use bounded UTF-8 JSON envelopes, then `PublicJson` validates the allowlist, exact primitive types, original string lengths, enum values and collection caps before returning. Layout/hello/presence codecs use explicit binary fields. The JSON implementation is private; use `PublicJson.toJson`, `fromJson`, `eventFromJson`, and `intentFromJson`.
-- Extra defensive limits for otherwise unspecified inputs: layout name/binding/task id 48 chars, event and monitor ids 16; lit-monitor set 64; nonnegative revisions/counts/event lengths, CI slot 0..7, progress 0..1, finite world-bounded layout coordinates and finite yaw/pitch. Envelope character budgets are state 30,000, event 2,048, intent 16,384. Caps reject before sanitization, so control/formatting characters cannot disguise overlength input. Unknown public JSON fields, duplicate agent/CI identities, and sanitized anchor/binding collisions are refused.
-- Opted-out activity/goal/tasks in a state are refused. Speech event policy belongs to MP-05/MP-06: the event record deliberately has no policy field. Its codec sanitizes/caps text; it cannot independently infer the owner's speech preference.
+- Extra defensive limits for otherwise unspecified inputs: layout name/task id 48 chars, event and monitor ids 16; lit-monitor set 64; nonnegative revisions/counts/event lengths, CI slot 0..7, progress 0..1, finite world-bounded layout coordinates and finite yaw/pitch. Envelope character budgets are state 30,000, event 2,048, intent 16,384. Caps reject before sanitization, so control/formatting characters cannot disguise overlength input. Unknown public JSON fields, duplicate JSON members, duplicate agent/CI identities, malformed JSON syntax, and sanitized anchor collisions are refused. JSON nesting is bounded at 16. Sanitization walks code points, skips the full code point after §, and removes ISO controls, FORMAT, LINE_SEPARATOR, PARAGRAPH_SEPARATOR and unpaired surrogates. State decode also checks the sanitized record re-encodes within its envelope.
+- `WorldIntent.isBinding(String)` admits only `agent:<sanitized nonempty id, ≤16 chars>`, `ci:#1`..`ci:#8`, `goal`, `goal:atrium`, `decisions`, `merge`, `beacon`. Construction and JSON decode both refuse other keys with the static message `invalid binding`. Monitor ids are nonempty, unchanged by sanitization, and at most 16 characters.
+- Opted-out activity/goal/tasks in a state are refused at construction and decode. Outgoing state is validated/sanitized before the C2S buffer is written. Speech event policy belongs to MP-05/MP-06: the event record deliberately has no policy field. Its codec sanitizes/caps text; it cannot independently infer the owner's speech preference.
 - `Anchors.publish(StudioId, Layout)` installs the supplied revision without writing disk. MP-03 owns per-plot persistence; MP-04 can preserve server layout revisions. The existing `publish(MinecraftServer, Layout)` increments and persists LOCAL as before; the contract's no-server `publish(Layout)` overload also exists.
-- `PlotGrid` spiral starts 0=(0,0), 1=(128,0), 2=(128,128). `indexAt` resolves the inclusive x/z site footprint and returns empty between sites. Strides must be 16-aligned and at least 96.
-- Client registry mutation APIs: `setOwn`, `setPlot(id,index,stride)`, `put(StudioView)`, `updateLayout`, `updateState`, `updatePresence`, `remove`, `reset`, `setOverlay`. `put` assigns the actual local slot, ignoring a supplied slot. Slots are not reused until disconnect/reset. `addListener(BiConsumer<StudioId,StudioView>)` receives null on removal; `addEventListener` / `fireEvent` carry `PublicEvent`. These run on the mutation thread; networking packets must mutate on the client thread. Anchor listeners hop to the client thread.
+- `PlotGrid` spiral starts 0=(0,0), 1=(128,0), 2=(128,128). `indexAt` resolves the inclusive x/z site footprint and returns empty between sites. Strides must be 16-aligned and at least 96; origins beyond ±30,000,000 are refused, including overflowing hello index/stride combinations before client identity changes. `Plot.box()` covers the complete inclusive boundary blocks (its upper AABB coordinates are exclusive).
+- Client registry mutation APIs: `setOwn`, `setPlot(id,index,stride)`, `put(StudioView)`, `updateLayout`, `updateState`, `updatePresence`, `remove`, `reset`, `setOverlay`. `put` assigns the actual local slot, ignoring a supplied slot. Slots are not reused until disconnect/reset. `addListener(BiConsumer<StudioId,StudioView>)` receives null on removal; `addEventListener` / `fireEvent` carry `PublicEvent`. These run on the mutation thread; networking packets must mutate on the client thread. Anchor listeners hop to the client thread and consult the latest anchor map: absence removes a view; an explicitly published EMPTY snapshot remains an update. `Studios.at` reuses cached views/optionals and mutation-time plot/view arrays; an external `PlotDirectory` may still allocate in its own lookup.
 - `Studios.own().layout()` reads `Anchors.forStudio(self)` so legacy LOCAL builds remain immediately visible. Layout synchronization must publish the layout to `Anchors` as well as set the plot; the anchor listener refreshes the registry.
 - Server effects and client hello effects explicitly schedule on their respective game threads. Only enabled dedicated servers send hello, only a matching remote hello attributed to the local player's UUID activates multiplayer, and integrated servers never send/reply. Disconnect resets mode, client slots, own identity, overlay, and remote anchors. Server config and mod-equipped markers reset on server stop. Hello is once per join; public publishers/relays/rates remain their owning packets' empty stubs.
-- A plot may be absent at hello time (`plotIndex=-1`), including this foundation-only dedicated server. Allocation and layout delivery belong to later packets.
+- No connected player owns a plot in the default directory: plot 0 belongs only to `LOCAL`, and this foundation-only dedicated server sends `plotIndex=-1`. Owner-path tests install a fake directory; owned-plot harness checks wait for MP-03.
+- `MpServerConfig.install(MpServerConfig)` returns the previous value and rejects null. Keep `server.isDedicatedServer() && MpServerConfig.current().enabled()`, read at call time. Fabric's `GameTestServerMixin` makes the game-test server report **dedicated**; its wiped run directory has no config, so loading uses defaults. Install/act/assert/restore the previous value in one server-thread call; multi-tick tests need a separate environment. Do not seed a global game-test config.
 - The wiring test checks that seams remain wired once and expose `init()`, rather than requiring them to remain empty after Wave 1 implements them.
 
 ## Verification
@@ -74,7 +75,20 @@ Run by the coordinator on 2026-10-03, outside the worker's sandbox, on the same 
 - `gw build`: green, 18 JUnit tests, no failures.
 - Singleplayer QA with the ordinary launcher, run id `MP-F-baseline-coordinator`: 10 ok, 0 skipped, 0 failed. Compared shot by shot with a run on `main`: the same composition in all ten, mean luma within 0.8 on every shot, PNGs read. The first run in a freshly created world can show a blank goal hologram in `qa02_entrance_atrium`; a second run shows it, on `main` as well.
 - Live dedicated hello (`game node artifacts/mp-f/check-hello.mjs`, server config `enabled: true`, one dev client): the server logs `hello_sent` and `hello_received`, the client logs `hello_received`, `hello_sent` and `mode_changed from=SINGLEPLAYER to=MULTIPLAYER`, and `dev.mp.studios` reports `MULTIPLAYER` with the own studio in slot 0.
-- Seen in the same run: on disconnect the client logs `mode_changed` from the Netty IO thread, so the disconnect reset does not run on the client thread. This is a review finding; the fix is pending.
+- Seen in the same run: on disconnect the client logs `mode_changed` from the Netty IO thread, so the disconnect reset does not run on the client thread. This was the pre-fix observation for F5/L1.
+
+### After the review fixes
+
+Run by the coordinator on 2026-10-04 against the review fixes, outside the worker's sandbox.
+
+- `gw test --rerun --no-build-cache`: 32 tests, no failures, errors or skips, executed for real (a plain `gw build` restores the test task from the build cache). `git status --short` stays clean afterwards: the test logs are under `build/`.
+- Singleplayer QA, run id `MP-F-fix1`: 10 ok, 0 skipped, 0 failed. Compared with a fresh run on `main` (`main-reference-20261004`): no shot moved, mean luma within 1.2 on every shot, both contact sheets read.
+  - **A QA reference is only valid for the display it was shot on.** The first compare, against `MP-F-baseline-coordinator`, reported four shots as different. That baseline was shot at 1920 × 1018 and this run at 3840 × 2082: the game window had moved to a display with a 2× backing scale, so every screen (console, diff review, library, task wall) is drawn half as large in the frame at the same GUI scale. Compare runs whose manifests report the same `game.window` size, and re-shoot the reference when it differs.
+- `dev.mp.fake` against the same client (`artifacts/mp-f/check-fake.mjs`): the two-agent fixture registers in `SINGLEPLAYER`, the event is injected and `{clear:true}` leaves one studio. A fixture with `goal.status: "none"` is accepted. The client log holds no `agentcraft.mp` line except the four `fake_studio` lines these checks caused.
+- Live dedicated hello (`artifacts/mp-f/check-hello.mjs`): the server logs `config_loaded enabled=true`, `hello_sent` and `hello_received`; the client logs `mode_changed from=SINGLEPLAYER to=MULTIPLAYER`, `hello_received` and `hello_sent`, and `dev.mp.studios` reports `MULTIPLAYER`.
+- F5/L1 confirmed fixed: on disconnect the client logs `mode_changed from=MULTIPLAYER to=SINGLEPLAYER` from the render thread.
+- No game, server or Foreman process was left running.
+- One change by the coordinator after the worker's round: `WorldIntent.isBinding` keeps its fixed names in a constant and checks `ci:#1` to `ci:#8` without a regular expression (it runs for every key of every intent). The 32 tests were re-run after it.
 
 ## Deviations and remaining verification
 
@@ -84,7 +98,7 @@ Run by the coordinator on 2026-10-03, outside the worker's sandbox, on the same 
 - The local dedicated harness used offline mode only in the ignored run directory; no shipped server config or resource was changed. Server flat-layer warning `No key layers in MapLike[{}]` did not prevent startup and was unrelated to the client SDL failure.
 - `/code-review` and `/security-review` were intentionally skipped per SWARM.md; the coordinator runs independent reviewers.
 
-## Coordinator commands for the remaining live hello
+## Coordinator commands for live verification
 
 Run outside the restricted display sandbox. Use this worktree, one game slot, and n=0 ports. The temporary check script and ignored server config already exist on this machine:
 
@@ -103,20 +117,85 @@ AGENTCRAFT_FOCUS=0 gw-raw runClient \
 --args='--username MPFoundation --width 1920 --height 1080 --quickPlayMultiplayer 127.0.0.1:25600' --console=plain
 ```
 
-Success requires live `hello_sent` and `hello_received` on the server/client logs, client `mode_changed ... to=MULTIPLAYER server=<hash>`, and `dev.mp.studios` mode MULTIPLAYER with the connection player's studio in slot 0. The script writes `hello-result.json`, quits the client and stops the server. Verify both processes exited; stop the exact recorded JVM if the launcher fails to forward stdin. If the memory guard refuses, stop and report without retrying.
+Allow the DevBridge port to settle for 35 seconds between client runs. Success requires live `hello_sent` and `hello_received` on the server/client logs, client `mode_changed ... to=MULTIPLAYER server=<hash>`, and `dev.mp.studios` mode MULTIPLAYER with the connection player's studio in slot 0. Also verify disconnect `mode_changed` runs on the client thread, and no removed remote studios remain after teardown/rejoin. The script writes `hello-result.json`, quits the client and stops the server. Verify both processes exited; stop the exact recorded JVM if the launcher fails to forward stdin. If the memory guard refuses, stop and report without retrying.
 
 For a repeat baseline using the ordinary launcher outside the process-inspection sandbox:
 
 ```sh
 game node tools/qa.mjs \
 --home "$PWD/.agentcraft-home" --profile mp-0 --port 27800 --dev-port 7900 \
---run-id MP-F-baseline-coordinator
-node tools/mac.mjs stop --profile mp-0
+--run-id MP-F-review-fixes
+game node artifacts/mp-f/check-fake.mjs
+game node tools/devcli.mjs --port 7900 --timeout 5 raw '{"type":"dev.mp.studios"}'
+game node tools/devcli.mjs --port 7900 --timeout 5 quit
+game node tools/mac.mjs stop --profile mp-0
 ```
+
+## Review fixes
+
+The pre-edit `gw build` was green with the original 18 tests. Current tests: **32 passed, zero failures/errors/skips**. No Minecraft, QA, harness or source-generation command ran during the worker's review round. The coordinator ran the live checks afterwards: see "After the review fixes".
+
+| Finding | Disposition and regression evidence |
+|---|---|
+| F1 | Fixed: four-field `ServerInfo`, bounded rates, accepted-info lifetime and `Studios.plot`. `WireBoundaryTest.hello_rates_and_combined_plot_origin_are_checked_before_handling`, `StudiosTest.retained_hello_plot_and_disconnect_are_client_executor_owned`, config install test. |
+| F2 | Fixed: distinct agent ids and CI slots, explicit collection-cap cause assertions (slot 8 would otherwise fail the slot range), literal all-false policy and all ten allowlist shapes. `CodecTest` cap, policy and shape tests. |
+| F3 | Fixed: scans literal and `MpEvents` arguments in real main/client sources, requires nonzero hits, validates all catalog constants. `FoundationTest.catalog_covers_every_mp_event_in_the_sources`; a real temporarily mutated call site failed on `not_in_catalog`, then was restored. |
+| F4 | Fixed: code-point sanitizer and state re-encoding envelope backstop. `WireBoundaryTest.accepted_at_cap_states_and_events_are_relay_stable` exercises separators, lone high/low surrogates, quotes, backslashes, supplementary characters, full collections/field caps, encoded lengths and C2S→S2C equality for state and events. |
+| F5 | Fixed: DISCONNECT schedules through `disconnectOn(Executor)`; JOIN also schedules on the client. `StudiosTest.retained_hello_plot_and_disconnect_are_client_executor_owned` invokes from a separate thread, checks no mutation before draining the client executor, and checks mode/registry listener threads. |
+| F6 | Fixed: `GoalStatusWire.NONE`, wire `none`; fake injection accepts a no-goal fixture with zero progress/null text. `DevFakeTest.none_goal_overlay_callback_and_invalid_numbers_follow_dev_contract`, including codec round trip. |
+| F7 | Fixed: anchor absence removes a registry entry, including queued notifications; published EMPTY is still a valid update. Publish/update/EMPTY/remove bridge regression in the retained-hello test. |
+| F8 | No code change needed: amendment C preserves the LOCAL-only directory. Existing hello test asserts −1 for a connected player; API notes now explicitly state no ownership before MP-03. |
+| F9 | Fixed: closed binding grammar at record construction and decode, static error, no changed-by-sanitization keys, nonempty bounded monitor ids. `WireBoundaryTest.binding_grammar_is_closed_at_construction_and_decode` checks every allowed form and each named refusal. |
+| F10 | Fixed: `install` returns the previous config; gate remains dedicated AND enabled and reads current values per call. `FoundationTest.install_restores_previous_config_and_preserves_dedicated_gate`. Game-test guidance above follows Fabric's mixin, not the rejected original reviewer recommendation. |
+| F11 | Fixed: AABB exclusive upper corner includes all boundary blocks. `FoundationTest.plot_box_agrees_at_every_boundary_and_extreme_origins_fail_closed` compares block origins and centers on/around all faces. |
+| F12 | Fixed: combined hello origin validated at decode, with defensive validation before client identity mutation. `WireBoundaryTest` hello test and `StudiosTest` rejection/timeout test. |
+| F13 | Fixed: JUnit working directory/logs under `build/test-work`; scanners receive `agentcraft.src`. Repeated real test runs leave no untracked log directory. |
+| F14 | Partly fixed: malformed public-state C2S logs existing `public_state_rejected reason=decode_failed`; capture regression in `WireBoundaryTest.outbound_state_refuses_opted_out_text_and_overlength_fields_before_writing`. Local hello version is bounded before send; maximal-payload test checks long versions and a split surrogate. Other codec refusals remain DecoderExceptions: the frozen catalog has no general decode-rejection event. |
+| F15 | Fixed: fake overlay changes before listeners fire. `DevFakeTest` asserts the lookup result inside the listener on both initial set and overlay=false. |
+| F16 | Partly fixed: absent config logs `file=none`; malformed/out-of-range defaults have regression tests. Arbitrary unknown key text remains redacted as `unknown`: emitting it would weaken the counts/ids-only telemetry boundary. |
+| F17 | Fixed documentation mismatch: snapshot APIs explicitly preserve caller-supplied revisions; builders must advance them, network consumers preserve server revisions. `AnchorsTest.identity_noop_does_not_notify_and_snapshot_publish_preserves_revision`. No revision-stamping change that would break relay equality. |
+| F18 | Fixed with F5/F7: remove remote anchors before reset; drain queued anchor work without recreating ghosts. Retained-hello executor/bridge regression. |
+| F19 | Fixed for public state: constructor refuses opted-out text, encoder validates/sanitizes before writing. Outbound-state regression. Speech policy remains MP-05/MP-06's contextual responsibility because events carry no policy; no new policy field added. |
+| F20 | Not changed: all actual call sites use safe metadata. A generic token grammar cannot distinguish free text from valid ids; broad logging/value/toString restrictions need coordinator agreement for later packet callers. See contract requests. |
+| F21 | Fixed: address hashes use a random, unlogged process salt; no new file. `StudiosTest.address_hash_is_salted_and_registry_lookup_reuses_immutable_views` proves it differs from the enumerable unsalted digest and remains stable within the process. |
+| F22 | Already fixed by coordinator; no absolute paths reintroduced. |
+| F23 | Fixed: STRICT streaming JSON parser, duplicate-member and trailing-value rejection, bounded nesting. `WireBoundaryTest.strict_json_refuses_comments_duplicates_and_trailing_values`. |
+| F24 | Fixed within catalog: refused remote hello logs `hello_received` with received protocol/current mode; inactive HUD wording is neutral and distinguishes rejection. `StudiosTest.singleplayer_never_times_out_remote_waits_exactly_100_ticks_and_rejections_are_visible`; integrated hello remains silent. |
+| F25 | Fixed registry allocations on known plot/own paths: cached immutable views/optionals, mutation-time arrays, no per-frame `all()` snapshots/streams. Registry identity/invalidation regression plus existing boundary/overlay tests. External directory allocation remains its implementation's responsibility. |
+| F26 | Not changed: outside MP-F ownership; MP-T generates game-test entrypoints and coordinator owns lang/mixin coordination. |
+| F27 | Fixed: maximal layout (512 48-char anchors, revision 7, pitch 30, plot 3), version, presence, events, 64 legal lamp bindings/monitor ids, asymmetric policy and agent booleans, offline flags, and literal config/policy defaults. `WireBoundaryTest` maximal and relay tests, `FoundationTest` defaults. The amended grammar deliberately forbids the reviewer's suggested arbitrary 48-char lamp keys. |
+| F28 | Fixed: 200 integrated ticks stay SINGLEPLAYER with no MP log, remote stays SINGLEPLAYER through tick 99 and changes at tick 100. `StudiosTest` timeout regression. |
+| F29 | Fixed with F13: logs under build, source scanners use the supplied source path and Gradle declares source inputs. |
+| F30 | Fixed: repeated `setSelf` is a no-op, avoiding duplicate LOCAL stop/reset notifications. `AnchorsTest` notification-count regression; mutating-thread and revision Javadocs corrected. |
+| F31 | Fixed: fractional/oversized integers become static `IllegalArgumentException("expected integer")`, translated to DevException. `DevFakeTest` checks 1.5 and 1e99. |
+| F32 | Fixed: `WiringTest` pins MP-F's five calls plus ten stubs and payload registration before server stubs. |
+
+API evidence was checked in installed jars/read-only Minecraft sources: Fabric `ConnectionMixin` injects into `channelInactive` and `handleDisconnection`, calling `AbstractNetworkAddon.handleDisconnect` → `ClientPlayNetworkAddon.invokeDisconnectEvent` directly. It does not hop to the client thread. Minecraft's `Minecraft` inherits `Executor` through `BlockableEventLoop`. Fabric `GameTestServerMixin.isDedicated` sets true. Gson's strict streaming reader APIs and AABB's exclusive maximum faces were verified with javap/source reads.
+
+Review-round checks (run `gw` from `mod/`):
+
+- `gw build`: untouched baseline passed, 18 tests; final implementation passed, 32 tests, 0 failures/errors/skips.
+- `gw test --tests dev.agentcraft.mp.FoundationTest.catalog_covers_every_mp_event_in_the_sources`: **failed as intended**, one test/one failure, with a temporary real call site changed to `not_in_catalog`. Exact assertion: `not_in_catalog ==> expected: <true> but was: <false>`. Restored the call site; subsequent full build passed.
+- An intermediate compile failed because a test-helper edit referenced `reason` outside its scope; corrected before the green builds. Two wrapper calls from the checkout root were refused with `gw: run from a mod/ directory (no ./gradlew here)`; subsequent calls used `mod/`.
+- `git diff --check`: pass. `git status --short`: only intended MP-F source/test/build/worknote edits and the new `WireBoundaryTest.java`; no test logs or other stray files.
+- The live commands above were left to the coordinator, who ran them afterwards (see "After the review fixes").
 
 ## Contract change requests
 
-None. No existing files outside the MP-F matrix row were edited. All artifacts, npm dependencies, run configs and test logs are ignored/local only.
+No additional change is required for amendments A–E. No files outside MP-F's row were edited and no telemetry catalog entry changed.
+
+Optional coordinator follow-ups:
+
+- F14: if every malformed payload needs structured rejection telemetry, define a generic decode event/reason (and ownership). The existing public-state event covers that C2S boundary only; inventing a new catalog entry here is outside this round's authority.
+- F20: remove “and by logs” from the PublicJson contract sentence and decide a typed telemetry-value policy before allowing public records/collections as log arguments. Current MP-F call sites never log these values or opt-in text.
+- F19: MP-05/MP-06 must gate Say.text with the studio's current sayText policy on send, relay and receipt. No foundation codec can infer that policy from a standalone event.
+
+## Review-fix commits
+
+The worker cannot commit in its sandbox; the coordinator committed its work after verifying it.
+
+1. `f755e34` — the review fixes: contract amendments A to E, the lifecycle and codec bugs, and the tests.
+2. The commit that follows it records the fixes and the coordinator's checks in this worknote.
 
 ## Commits
 
