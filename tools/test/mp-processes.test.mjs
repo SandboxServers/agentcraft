@@ -19,7 +19,8 @@ test('ownership requires PID plus exact start time, and leaves reused/dead/missi
 test('crash recovery finds only the durable unique marker and captures identity before stop', () => {
   const marker = 'ac-mp-12345678-1234-1234-1234-123456789abc';
   const entry = { marker, executable: 'java', kind: 'client', pid: 42, startTime: 'old-start', wrapper: { pid: 40, startTime: 'wrapper' } };
-  const inventory = [{ pid: 42, command: 'unrelated Java' }, { pid: 44, command: `java -Dagentcraft.mp.run=${marker} @args` },
+  const inventory = [{ pid: 40, command: `node bgrun.mjs ${marker}.json` },
+    { pid: 42, command: 'unrelated Java' }, { pid: 44, command: `java -Dagentcraft.mp.run=${marker} @args` },
     { pid: 45, command: `grep -Dagentcraft.mp.run=${marker}` },
     { pid: 46, command: `${process.execPath} ${path.join('tools', 'lib', 'bgrun.mjs')} ${path.join('run', `${marker}.json`)}` }];
   const stamp = pid => ({ 40: 'wrapper', 42: 'new-start', 44: 'game-start', 46: 'wrapper-start' })[pid] ?? null;
@@ -45,12 +46,12 @@ test('a process-group snapshot retains child identities after leader exit and ex
   const table = [{ pid: 42, groupPid: 42 }, { pid: 43, groupPid: 42 }, { pid: 44, groupPid: 44 }];
   const stamp = pid => ({ 42: 'leader', 43: 'tool', 44: 'other' })[pid];
   const snapshot = groupSnapshot(record, table, '', stamp);
-  assert.deepEqual(snapshot, [{ pid: 42, startTime: 'leader' }, { pid: 43, startTime: 'tool' }]);
+  assert.deepEqual(snapshot, [{ pid: 42, startTime: 'leader' }, { pid: 43, startTime: 'tool', groupPid: 42 }]);
   assert.equal(sameProcess(snapshot[1], '', pid => pid === 43 ? 'tool' : null), true);
   assert.equal(sameProcess(snapshot[1], '', () => 'reused'), false);
   assert.deepEqual(groupSnapshot({ ...record, startTime: 'old leader' }, table, '', stamp), []);
   const crashedDown = { ...record, recoveredProcesses: [{ ...record, members: [{ pid: 43, startTime: 'tool' }] }] };
-  assert.deepEqual(recoverProcesses(crashedDown, '', [], pid => pid === 43 ? 'tool' : null), [{ pid: 43, startTime: 'tool' }]);
+  assert.deepEqual(recoverProcesses(crashedDown, '', [], pid => pid === 43 ? 'tool' : null), [{ pid: 43, startTime: 'tool', groupPid: 42 }]);
 });
 
 test('JSON summary describes stopped, ready and partial runs using recorded identity', () => {
