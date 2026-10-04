@@ -39,6 +39,16 @@ export function sameProcess(record, root, stamp = processStamp) {
   return !!(record?.pid && record?.startTime && stamp(record.pid, root) === record.startTime);
 }
 
+// POSIX `ps` reports start times in whole seconds, so a PID reused within its predecessor's
+// start second passes sameProcess. There a process is this run's only while its command line
+// still carries the entry's launch marker; a recorded child carries none, and must still be
+// in the process group of the leader it was recorded under. Windows start times have 100 ns.
+export function carriesRun(record, marker, table, platform = process.platform) {
+  if (platform === 'win32' || !marker) return true;
+  const row = table.find(p => p.pid === record.pid);
+  return !!row && (record.groupPid && record.groupPid !== record.pid ? row.groupPid === record.groupPid : row.command.includes(marker));
+}
+
 export function processInventory(root) {
   if (process.platform === 'win32') {
     const raw = powershell(root, 'ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine)');
@@ -55,14 +65,15 @@ export function processInventory(root) {
 // Durable intent precedes spawn. A unique marker outside the Java argfile permits recovery
 // if the launcher dies in the tiny gap between spawn and recording the PID/start time.
 // The build's marker is a Gradle project property; the shared daemon never carries it.
-export function recoverProcesses(entry, root, inventory = processInventory(root), stamp = processStamp) {
+export function recoverProcesses(entry, root, inventory = processInventory(root), stamp = processStamp, platform = process.platform) {
   const found = [];
   const pending = [entry.wrapper, entry];
   while (pending.length) {
     const record = pending.pop();
     if (!record) continue;
-    pending.push(...(record.members ?? []), ...(record.recoveredProcesses ?? []));
-    if (sameProcess(record, root, stamp) && !found.some(p => p.pid === record.pid)) found.push(record);
+    pending.push(...(record.members ?? []).map(member => ({ groupPid: record.pid, ...member })), ...(record.recoveredProcesses ?? []));
+    if (sameProcess(record, root, stamp) && carriesRun(record, entry.marker, inventory, platform) &&
+      !found.some(p => p.pid === record.pid)) found.push(record);
   }
   if (!/^ac-mp-[0-9a-f-]{36}$/.test(entry.marker ?? '')) return found;
   for (const p of inventory) {
@@ -123,10 +134,16 @@ export async function startProcess(spec, entry, state, persist, { platform = pro
 
 /** Resolves true when a process had to be force-killed after the wait. */
 export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRecord = record, persist = () => {}, kind, requested = false,
-  platform = process.platform, shell = powershell, stamp = processStamp, now = Date.now, delay = sleep,
+  platform = process.platform, shell = powershell, stamp = processStamp, now = Date.now, delay = sleep, marker,
   inventory = processInventory, kill = process.kill.bind(process), budgetMs = Infinity } = {}) {
   const deadline = now() + budgetMs;
-  if (!sameProcess(record, root, stamp)) return;
+  // Read immediately before each signal: the live identities that still carry this run (carriesRun).
+  const owned = list => {
+    const live = list.filter(member => sameProcess(member, root, stamp));
+    const table = live.length && marker && platform !== 'win32' ? inventory(root) : [];
+    return live.filter(member => carriesRun(member, marker, table, platform));
+  };
+  if (!owned([record]).length) return;
   const members = platform !== 'win32' && record.groupPid === record.pid
     ? groupSnapshot(record, inventory(root), root, stamp) : [record];
   record.members = members.filter(member => member.pid !== record.pid);
@@ -145,7 +162,7 @@ export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRec
   }
   const until = Math.min(deadline, now() + timeoutMs);
   while (now() < until && members.some(member => sameProcess(member, root, stamp))) await delay(Math.min(100, Math.max(0, deadline - now())));
-  const forced = members.filter(member => sameProcess(member, root, stamp));
+  const forced = owned(members);
   for (const member of forced) {
     if (platform === 'win32') shell(root, `Stop-OwnTree ${member.pid} ${psQuote(member.startTime)} | Out-Null`);
     else {
@@ -154,7 +171,7 @@ export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRec
     }
   }
   for (let i = 0; i < 50 && now() < deadline && members.some(member => sameProcess(member, root, stamp)); i++) await delay(Math.min(100, Math.max(0, deadline - now())));
-  const left = members.filter(member => sameProcess(member, root, stamp));
+  const left = owned(members);
   if (left.length) throw new Error(`processes ${left.map(member => member.pid).join(', ')} are still running`);
   return forced.length > 0;
 }
@@ -189,7 +206,7 @@ export function groupSnapshot(record, inventory, root, stamp = processStamp) {
   if (!sameProcess(record, root, stamp) || record.groupPid !== record.pid) return [];
   return [{ pid: record.pid, startTime: record.startTime }, ...inventory.filter(p => p.groupPid === record.pid && p.pid !== record.pid).flatMap(p => {
     const startTime = stamp(p.pid, root);
-    return startTime ? [{ pid: p.pid, startTime }] : [];
+    return startTime ? [{ pid: p.pid, startTime, groupPid: record.pid }] : [];
   })];
 }
 

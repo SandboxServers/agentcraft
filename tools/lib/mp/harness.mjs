@@ -126,7 +126,7 @@ export async function shutdown(plan, state, progress = () => {}, {
     }
     for (const record of records) {
       try {
-        const forced = await stop(record, plan.root, { timeoutMs: entry.kind === 'server' ? 30_000 : 5000, requested,
+        const forced = await stop(record, plan.root, { timeoutMs: entry.kind === 'server' ? 30_000 : 5000, requested, marker: entry.marker,
           kind: entry.kind, consoleRecord: entry.wrapper ?? record, persist: () => saveJson(plan.file, state) });
         if (forced && entry.kind === 'server' && record.role !== 'wrapper' && record.pid !== entry.wrapper?.pid) {
           progress('The server did not exit by itself and was killed without a final save: changes since its last autosave are lost.');
@@ -273,7 +273,7 @@ export async function runHarness(root, opt, { progress = () => {}, check = () =>
           entry.recoveredProcesses = recoverProcesses(entry, root).map(({ pid, startTime, groupPid, role }) => ({ pid, startTime, groupPid, role }));
           persist();
           for (const record of entry.recoveredProcesses) {
-            await stopProcess(record, root, { kind: 'client', timeoutMs: 5000, budgetMs: Math.max(0, deadline - Date.now()), persist });
+            await stopProcess(record, root, { kind: 'client', marker: entry.marker, timeoutMs: 5000, budgetMs: Math.max(0, deadline - Date.now()), persist });
           }
           entry.retired = true;
           persist();

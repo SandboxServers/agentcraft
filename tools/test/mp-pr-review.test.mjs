@@ -206,3 +206,25 @@ test('PR7: only the game clients opt in to the remote DevBridge commands', t => 
     ['1', '1', '8084', 'bin', local.clients[0].gameDir]);
   assert.ok(client.args.includes('--quickPlayMultiplayer') && !server.args.includes('--quickPlayMultiplayer'));
 });
+
+test('PR8: a PID reused within the same whole second is not recovered or signalled unless it still carries this run', async () => {
+  const marker = 'ac-mp-12345678-1234-1234-1234-123456789abc';
+  const stamp = () => 'Sun Oct  4 12:00:00 2026'; // ps lstart: the reused PIDs report the very same start
+  const [leader, child] = [{ pid: 42, groupPid: 42, startTime: stamp() }, { pid: 43, groupPid: 42, startTime: stamp() }];
+  const ours = [{ pid: 42, groupPid: 42, command: `java -Dagentcraft.mp.run=${marker} @args` }, { pid: 43, groupPid: 42, command: 'git status' }];
+  const reused = [{ pid: 42, groupPid: 42, command: 'vim notes.txt' }, { pid: 43, groupPid: 900, command: 'git status' }];
+  const entry = { kind: 'client', marker, executable: 'java', ...leader, members: [{ pid: 43, startTime: stamp() }] };
+  assert.deepEqual(recoverProcesses(entry, 'root', ours, stamp, 'linux').map(p => p.pid), [42, 43]);
+  assert.deepEqual(recoverProcesses(entry, 'root', reused, stamp, 'linux'), []);
+  const stop = async (record, ...tables) => {
+    const signals = [];
+    let time = 0;
+    await stopProcess(record, 'root', { platform: 'linux', marker, timeoutMs: 100, stamp, now: () => time, delay: async ms => { time += ms; },
+      inventory: () => tables.length > 1 ? tables.shift() : tables[0], kill: (pid, signal) => signals.push([pid, signal]) }).catch(() => {});
+    return signals;
+  };
+  assert.deepEqual(await stop(leader, ours), [[-42, 'SIGTERM'], [42, 'SIGKILL'], [43, 'SIGKILL']]);
+  assert.deepEqual(await stop(child, ours), [[43, 'SIGTERM'], [43, 'SIGKILL']]);
+  for (const record of [leader, child]) assert.deepEqual(await stop({ ...record }, reused), []);
+  assert.deepEqual(await stop({ ...leader }, ours, ours, reused), [[-42, 'SIGTERM']]); // reused between the two signals
+});
