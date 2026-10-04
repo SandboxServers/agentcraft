@@ -24,8 +24,10 @@ WORKDIR /src/mod
 COPY mod/ ./
 # Loom downloads Minecraft and Fabric here. The cache mount keeps them between local builds;
 # CI uses the buildx GHA cache for the layers instead.
+# `-x runGameTest`: the image build runs JUnit and leaves the game tests to CI, so building an
+# image does not boot a Minecraft server (MP-14 Decision).
 RUN --mount=type=cache,target=/root/.gradle \
-    sh ./gradlew --no-daemon --console=plain build \
+    sh ./gradlew --no-daemon --console=plain build -x runGameTest \
  && jar="$(find build/libs -maxdepth 1 -name 'agentcraft-*.jar' ! -name '*-sources.jar' | head -n 1)" \
  && test -n "$jar" && cp "$jar" /agentcraft.jar
 
@@ -74,7 +76,7 @@ COPY --from=mod /agentcraft.jar /opt/agentcraft/mods/agentcraft.jar
 COPY deploy/server/ /opt/agentcraft/defaults/
 COPY deploy/bin/ /opt/agentcraft/bin/
 # Strip CR in case the build context came from a Windows checkout with autocrlf.
-RUN sed -i 's/\r$//' /opt/agentcraft/bin/*.sh /opt/agentcraft/defaults/server.properties \
+RUN sed -i 's/\r$//' /opt/agentcraft/bin/*.sh /opt/agentcraft/defaults/server.properties /opt/agentcraft/defaults/config/*.json \
  && chmod 0755 /opt/agentcraft/bin/*.sh \
  && echo "${AGENTCRAFT_GIT_SHA}" > /opt/agentcraft/VERSION
 
