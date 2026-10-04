@@ -180,10 +180,15 @@ A stopped run can retain historical states and process entries; each live proces
 
 Always run `down`, including after a failed `up`. It stops only recorded PID/start-time
 identities, can recover a launcher crash using unique per-process launch markers, and
-never kills shared Gradle daemons or foreign port owners. It asks an owned DevBridge to
-quit, then signals the clients, Foremen and dedicated server, with bounded waits and a
+never kills shared Gradle daemons or foreign port owners. An unfinished build is recovered
+only from a process that is the Gradle launch itself (the default launcher, or Java running
+Gradle with the harness's arguments), never from a command that merely quotes that command
+line. It asks an owned DevBridge to quit and gives a client that answered up to 5 seconds to
+exit by itself, then signals the clients, Foremen and dedicated server, with bounded waits and a
 force-stop fallback. On Windows only Foremen receive Ctrl+Break (a JVM answers it with a
-thread dump) and clients get their post-`dev.quit` wait. The Windows server has no stdin
+thread dump) and clients get their post-`dev.quit` wait; stopping an unfinished build there
+kills its process tree except a Gradle daemon that build started (not yet run on Windows).
+The Windows server has no stdin
 under the background runner, so there `up` enables RCON for it: loopback only, a random
 password, and whichever port is free (kept in `state.json`; the slot's block has none for
 it). `down` sends the console `stop` through it and waits up to 30 seconds for the save and

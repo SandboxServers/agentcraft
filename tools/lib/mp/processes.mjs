@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import { exportScript, psQuote } from './launch.mjs';
+import { gradleArguments, gradleInvocation, psQuote } from './launch.mjs';
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function readJson(file) {
@@ -62,6 +62,26 @@ export function processInventory(root) {
   });
 }
 
+// `ps` prints argv joined by spaces, so a command that only quotes a build's command line
+// (grep -F '<invocation>', sh -c "ps ... | grep ...") carries its marker and init script too.
+// A build is therefore recognised by its shape: the launcher exactly as prepare() spawns it by
+// default, or Java started by a Gradle launcher and ending in the harness's own Gradle
+// arguments, which is what `sh ./gradlew` becomes, also behind a custom Gradle command.
+// Windows keeps the quoting that ps drops, so quotes count only around the program's path.
+export function isBuildLaunch(command, root, marker, platform = process.platform) {
+  const bare = text => text.replace(/["']/g, '').trim();
+  const line = bare(command);
+  const from = line.indexOf(' -PmpLaunchFile='), to = line.lastIndexOf(` -PmpRun=${marker} `);
+  if (!marker || from < 0 || to < from) return false;
+  const output = line.slice(from + ' -PmpLaunchFile='.length, to);
+  const spawned = gradleInvocation(root, output, undefined, platform, marker);
+  if (line === bare([spawned.command, ...spawned.args].join(' '))) return true;
+  const tail = ` ${bare(gradleArguments(root, output, marker).join(' '))}`;
+  const program = /^"([^"]+)"|^(\S+)/.exec(command.trim())?.slice(1).find(Boolean) ?? '';
+  return line.endsWith(tail) && /(^|[\\/])java(\.exe)?$/i.test(program) &&
+    /gradle-wrapper\.jar|org\.gradle\./.test(line.slice(0, -tail.length));
+}
+
 // Durable intent precedes spawn. A unique marker outside the Java argfile permits recovery
 // if the launcher dies in the tiny gap between spawn and recording the PID/start time.
 // The build's marker is a Gradle project property; the shared daemon never carries it.
@@ -79,9 +99,9 @@ export function recoverProcesses(entry, root, inventory = processInventory(root)
   for (const p of inventory) {
     if (!p.command.includes(entry.marker) || found.some(record => record.pid === p.pid)) continue;
     const startsWithExe = executable => executable && (p.command.startsWith(`${executable} `) || p.command.startsWith(`"${executable}" `));
-    // gradlew execs Java, so a build has no stable executable prefix: require its init script too.
+    // gradlew execs Java, so a build has no stable executable prefix: it is recognised by shape.
     const direct = startsWithExe(entry.executable) || (entry.kind === 'foreman' && p.command.trim() === entry.marker) ||
-      (entry.kind === 'build' && p.command.includes(exportScript(root)));
+      (entry.kind === 'build' && isBuildLaunch(p.command, root, entry.marker, platform));
     const wrapper = startsWithExe(process.execPath) && p.command.includes(path.join(root, 'tools', 'lib', 'bgrun.mjs'));
     // A coordinator's grep/search containing our marker is never a harness process.
     if (!direct && !wrapper) continue;
@@ -155,16 +175,25 @@ export async function stopProcess(record, root, { timeoutMs = 10_000, consoleRec
       if (shell(root, `Send-CtrlBreak ${consoleRecord.pid}`).toLowerCase() !== 'true') timeoutMs = 0;
     } else if (kind !== 'client' && !requested) timeoutMs = 0;
   } else {
+    let leader = true;
+    if (requested) {
+      // dev.quit replies first and stops Minecraft 250 ms later, so a client that acknowledged it
+      // gets a bounded wait to exit by itself before any signal. Its exit ends the wait.
+      const grace = Math.min(deadline, now() + timeoutMs);
+      while (now() < grace && sameProcess(record, root, stamp)) await delay(Math.min(100, Math.max(0, deadline - now())));
+      leader = owned([record]).length > 0; // read again after the wait
+    }
     // Direct POSIX launches own a detached group. Signal its tools too, while the leader's
     // PID/start identity still matches, then retain member identities across leader exit.
-    try { kill(record.groupPid === record.pid ? -record.pid : record.pid, 'SIGTERM'); }
+    try { if (leader) kill(record.groupPid === record.pid ? -record.pid : record.pid, 'SIGTERM'); }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
   }
   const until = Math.min(deadline, now() + timeoutMs);
   while (now() < until && members.some(member => sameProcess(member, root, stamp))) await delay(Math.min(100, Math.max(0, deadline - now())));
   const forced = owned(members);
   for (const member of forced) {
-    if (platform === 'win32') shell(root, `Stop-OwnTree ${member.pid} ${psQuote(member.startTime)} | Out-Null`);
+    // A Gradle daemon the build started is its descendant here, and is shared with later builds.
+    if (platform === 'win32') shell(root, `Stop-OwnTree ${member.pid} ${psQuote(member.startTime)}${kind === 'build' ? ' -KeepGradleDaemons' : ''} | Out-Null`);
     else {
       try { kill(member.pid, 'SIGKILL'); }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
