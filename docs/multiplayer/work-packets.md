@@ -194,12 +194,12 @@ Multiplayer is on only when a dedicated server has `enabled: true` **and** the c
 | `autoworld_skipped` | info | MP-01 | `reason` (`quickplay_multiplayer`, `multiplayer_screen`, `disabled`) |
 | `plot_built` / `plot_build_failed` | info / error | MP-02 | `ms`, `changed`, `kept`; `reason` (`no_plot`, `bad_origin`, `io_error`, `build_error`). Logged by the builder, and only for a studio other than `LOCAL` |
 | `plot_allocated` / `plot_allocation_failed` | info / error | MP-03 | `index`, `origin`; `reason` (`grid_full`, `io_error`) |
-| `plot_command` | info | MP-03 | `command`, `target_plot`, `ok` |
+| `plot_command` | info | MP-03 | `command`, `target_plot`, `ok`. A refused command is logged with `ok=false` and carries no `reason` |
 | `layout_sent` / `layout_applied` / `layout_removed` | debug | MP-04 | `anchors`, `to` (the viewer) / `anchors` / none. `layout_sent` is logged by the server, the other two by the client |
 | `public_state_sent` / `public_state_skipped` | debug | MP-05 | `agents`, `bytes`, `policy`; `reason` (`unchanged`, `rate_limited`, `not_multiplayer`) |
 | `policy_changed` | info | MP-05 | `before`, `after` (flag bits) |
 | `public_state_rejected` | warn | MP-06 | `reason` (`no_plot`, `rate_limited`, `bad_version`, `decode_failed`). `bad_version` means the sender has no accepted hello. `decode_failed` comes from MP-F's codec, before any handler, so it has no `player` |
-| `studio_event_rejected` | warn | MP-06 | `reason` (`no_plot`, `rate_limited`, `unknown_agent`) |
+| `studio_event_rejected` | warn | MP-06 | `reason` (`no_plot`, `rate_limited`, `bad_version`, `unknown_agent`). `bad_version` means the sender has no accepted hello, as for `public_state_rejected` |
 | `relay_sent` | debug | MP-06 | `recipients`, `bytes` |
 | `presence` | info | MP-06 | `online` |
 | `remote_studio_added` / `remote_studio_removed` | info | MP-06 | `slot` |
@@ -475,7 +475,7 @@ Decisions:
 - **Range comes from `StudioRange`** (see "Who sees which studio"). The relay keeps no range set of its own. On `entered` it sends `PresenceS2C` and the studio's latest state. It relays to `StudioRange.viewersOf(studio)`, minus the owner.
 - **A remote view is removed only by MP-04's `LayoutRemoveS2C`.** MP-06 sends no removal. `RemoteStudiosFeature` logs `remote_studio_added` and `remote_studio_removed` from a `Studios` listener.
 - **Refusals.** A state from a player with no accepted hello is `bad_version`, from a player with no plot `no_plot`, over the rate `rate_limited`. `decode_failed` is logged by MP-F's codec. A refused state is not stored.
-- **Events:** their own bucket at `publicStatePerSecond` (see "Rates"). An event is refused with `studio_event_rejected` when the sender has no plot, is over the rate, or names an agent that is not in the studio's latest state. When that state's `policy.sayText` is off, the relay clears `Say.text` before sending it on.
+- **Events:** their own bucket at `publicStatePerSecond` (see "Rates"). An event is refused with `studio_event_rejected` when the sender has no accepted hello (`bad_version`), has no plot, is over the rate, or names an agent that is not in the studio's latest state. When that state's `policy.sayText` is off, the relay clears `Say.text` before sending it on.
 - **Presence** goes to the studio's viewers, not to everyone: on `entered`, and when the owner joins or leaves. `ownerName` is the owner's player name, or empty when the server does not know it. When the owner leaves, the stored state is kept with `foremanOnline=false` and relayed once.
 - **The "forged id" game test** proves attribution: `StudioStateS2C.studio` is the connection's player even when the ids inside the state look like another studio's. The payload has no studio field to forge.
 - The handlers take the sender's UUID and the state as plain arguments, so JUnit can drive every refusal without a connection.
