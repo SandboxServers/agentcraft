@@ -198,13 +198,13 @@ public final class TaskWallFeature {
 			|| !bh.getBlockPos().equals(pos)) {
 			return false;
 		}
-		var at = StudioDisplays.at(pos);
-		if (at.isPresent() && !at.get().own()) {
-			return false; // a remote board's cards are not the viewer's own; MP-11 owns visitor routing
-		}
 		BlockState st = mc.level.getBlockState(pos);
 		if (!st.is(ModBlocks.TASK_BOARD)) {
 			return false;
+		}
+		var at = StudioDisplays.at(pos);
+		if (at.isPresent() && !at.get().own()) {
+			return false; // a remote board's cards are not the viewer's own; MP-11 owns visitor routing
 		}
 		BlockPos origin = PanelBlock.origin(mc.level, pos, st);
 		TaskBoard b = BOARDS.get(origin);

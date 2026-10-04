@@ -192,8 +192,9 @@ final class MonitorScreen {
 
 	/**
 	 * Rebuild from a remote studio's public view instead of the viewer's Foreman. No log, diff or
-	 * path is ever read; {@link #rows} stays empty and the cache key is the view (which carries the
-	 * remote state's {@code rev}). Returns true when it rebuilt.
+	 * path is ever read; {@link #rows} is empty for an agent and holds only the public counts in feed
+	 * mode, and the cache key is the view (which carries the remote state's {@code rev}). Returns true
+	 * when it rebuilt.
 	 */
 	boolean syncRemote(RemoteMonitorView v, ScreenStyle st, int ppb, int panelW, int panelH) {
 		if (v.equals(remoteView) && st == style && ppb == this.ppb && panelW == this.panelW && panelH == this.panelH) {

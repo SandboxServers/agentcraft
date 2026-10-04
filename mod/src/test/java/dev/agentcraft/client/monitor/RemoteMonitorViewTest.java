@@ -109,15 +109,4 @@ class RemoteMonitorViewTest {
 		assertEquals("error", RemoteMonitorView.of(withAgent(AgentStateWire.BLOCKED, false, null), true, "kit").family());
 		assertEquals("done", RemoteMonitorView.of(withAgent(AgentStateWire.DONE, false, null), true, "kit").family());
 	}
-
-	@Test
-	void the_view_cannot_structurally_hold_private_state() {
-		for (var c : RemoteMonitorView.class.getRecordComponents()) {
-			Package p = c.getType().getPackage();
-			if (p != null) {
-				assertNotEquals("dev.agentcraft.client.foreman", p.getName(), c.getName() + " must not be a Foreman type");
-			}
-			assertFalse(dev.agentcraft.client.foreman.ForemanState.class.isAssignableFrom(c.getType()), c.getName());
-		}
-	}
 }

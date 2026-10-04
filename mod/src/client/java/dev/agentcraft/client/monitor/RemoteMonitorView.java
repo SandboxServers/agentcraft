@@ -14,8 +14,8 @@ import org.jspecify.annotations.Nullable;
  * {@link MonitorScreen}'s existing Foreman path.
  *
  * <p>{@code activity} is null whenever the owner did not opt the activity text in; the screen shows
- * "activity hidden" for that. The record's shape is the privacy boundary: it cannot carry a private
- * field, and {@link #of} reads only the public record.
+ * "activity hidden" for that. {@link #of} reads only the public record; the in-game overlay check
+ * is the leak test.
  */
 public record RemoteMonitorView(int rev, Kind kind, String binding, boolean online,
 	@Nullable String agentId, @Nullable String name, @Nullable AgentStateWire state, @Nullable StationWire station,

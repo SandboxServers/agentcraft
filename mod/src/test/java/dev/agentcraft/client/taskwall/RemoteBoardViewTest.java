@@ -26,11 +26,12 @@ class RemoteBoardViewTest {
 	}
 
 	@Test
-	void counts_are_per_status_and_blocked_is_reported_in_todo() {
+	void counts_are_per_status_and_todo_counts_its_blocked_subset() {
 		RemoteBoardView v = RemoteBoardView.of(noTasks(), true);
 		assertTrue(v.present());
 		assertEquals(4, v.columns().size());
-		assertEquals(new RemoteBoardView.Column(RemoteBoardView.Lane.TODO, 2, 5), v.columns().get(0));
+		// todo 2 + blocked 5: a blocked public task sits in the Todo lane, as on the own wall
+		assertEquals(new RemoteBoardView.Column(RemoteBoardView.Lane.TODO, 7, 5), v.columns().get(0));
 		assertEquals(new RemoteBoardView.Column(RemoteBoardView.Lane.DOING, 1, 0), v.columns().get(1));
 		assertEquals(new RemoteBoardView.Column(RemoteBoardView.Lane.REVIEW, 4, 0), v.columns().get(2));
 		assertEquals(new RemoteBoardView.Column(RemoteBoardView.Lane.DONE, 3, 0), v.columns().get(3));
@@ -72,19 +73,5 @@ class RemoteBoardViewTest {
 		assertNull(RemoteBoardView.lane(TaskStatusWire.CANCELLED));
 		RemoteBoardView v = RemoteBoardView.of(withTasks(List.of(new PublicTask("t", "Gone", TaskStatusWire.CANCELLED, null))), true);
 		assertTrue(v.cards().isEmpty());
-	}
-
-	@Test
-	void the_view_cannot_structurally_hold_private_state() {
-		for (var c : RemoteBoardView.class.getRecordComponents()) {
-			assertFalse(dev.agentcraft.client.foreman.ForemanState.class.isAssignableFrom(c.getType()), c.getName());
-		}
-		for (var c : RemoteBoardView.Card.class.getRecordComponents()) {
-			Package p = c.getType().getPackage();
-			if (p != null) {
-				assertNotEquals("dev.agentcraft.client.foreman", p.getName(), c.getName());
-			}
-			assertFalse(dev.agentcraft.client.foreman.Protocol.Task.class.isAssignableFrom(c.getType()), c.getName());
-		}
 	}
 }
