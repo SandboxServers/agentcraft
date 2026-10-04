@@ -1,8 +1,11 @@
 package dev.agentcraft.client.agents;
 
+import dev.agentcraft.Cast;
 import dev.agentcraft.client.foreman.Protocol.Agent;
 import dev.agentcraft.client.foreman.Protocol.AgentState;
 import dev.agentcraft.client.ui.UiStyle;
+import dev.agentcraft.mp.StudioId;
+import dev.agentcraft.mp.state.PublicAgent;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -11,6 +14,12 @@ import org.jspecify.annotations.Nullable;
  */
 public final class AgentView {
 	public final String id;
+	/** Render-layout identity; cast ids remain in {@link #id} for anchors and skin lookup. */
+	public String plateKey;
+	public StudioId studioId = StudioId.LOCAL;
+	public boolean remote;
+	public String ownerName = "";
+	StudioAgents studioAgents;
 	public String name;
 	/** Identity colour (scarf/badge), ARGB. */
 	public int color;
@@ -59,7 +68,19 @@ public final class AgentView {
 
 	public AgentView(String id) {
 		this.id = id;
+		this.plateKey = id;
 		this.name = id;
+	}
+
+	void attach(StudioAgents studio, boolean remote, String ownerName) {
+		if (this.studioAgents == studio && this.remote == remote && this.ownerName.equals(ownerName)) {
+			return;
+		}
+		this.studioAgents = studio;
+		this.studioId = studio.id();
+		this.remote = remote;
+		this.ownerName = ownerName;
+		this.plateKey = studio.id().equals(StudioId.LOCAL) ? id : studio.id().owner() + "/" + id;
 	}
 
 	void update(Agent a, boolean staleLink, @Nullable String awaitingDecisionId, int awaitingDecisions) {
@@ -78,6 +99,31 @@ public final class AgentView {
 		stale = staleLink;
 		taskId = a.taskId();
 		liveFamily = statusFamily(a.state(), awaitingUser);
+		family = stale || !active ? "idle" : liveFamily;
+	}
+
+	/** Derive a remote plate strictly from the public allowlist. */
+	void updatePublic(PublicAgent a, boolean offline) {
+		name = a.name();
+		Cast.Member member = Cast.get(a.id());
+		color = 0xFF000000 | (member == null ? 0x9C9488 : member.color());
+		nameColor = UiStyle.agentOnDark(a.id());
+		try {
+			state = AgentState.valueOf(a.state().name());
+		} catch (IllegalArgumentException ignored) {
+			state = AgentState.UNKNOWN;
+		}
+		awaitingDecision = null;
+		awaitingCount = 0;
+		awaitingUser = a.awaitingUser();
+		role = member == null ? "" : member.role();
+		title = member == null || member.title().isEmpty() ? null : member.title();
+		activity = a.activity() == null ? "" : a.activity();
+		active = a.active();
+		paused = a.paused();
+		stale = offline;
+		taskId = null;
+		liveFamily = statusFamily(state, awaitingUser);
 		family = stale || !active ? "idle" : liveFamily;
 	}
 
@@ -105,6 +151,10 @@ public final class AgentView {
 		}
 		if (paused) {
 			return activity.isEmpty() ? "paused" : "paused · " + activity;
+		}
+		if (remote && activity.isEmpty()) {
+			String wire = state.wire().replace('_', ' ');
+			return wire.isEmpty() ? "idle" : wire;
 		}
 		return activity;
 	}
