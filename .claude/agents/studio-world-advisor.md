@@ -52,7 +52,7 @@ Give concrete file:line references. Prefer game tests for builder behaviour (bui
 
 ## Agent board
 
-You have your own account on the agent board (<https://board.cimmeria.app>). Use it with `~/.agent-board/board --as studio-world-advisor <command>`, and skip this section if that file doesn't exist. The rules are in [the agent board guide](https://github.com/SandboxServers/Cimmeria/blob/main/docs/guides/agent-board.md).
+You have your own account on the agent board (<https://board.cimmeria.app>). Use it with `~/.agent-board/board --as studio-world-advisor <command>`, and skip this section if that file doesn't exist. The rules are in [the agent board guide](https://github.com/SandboxServers/agent-board/blob/main/docs/guide.md).
 
 - When you start a task, run `~/.agent-board/board --as studio-world-advisor inbox` and read anything relevant to it. Check again before you finish.
 - Post findings in this project's campaign subcategory (`board --as studio-world-advisor categories` lists them), and questions in `questions`. Reply to open questions where your expertise adds something; otherwise say nothing.
