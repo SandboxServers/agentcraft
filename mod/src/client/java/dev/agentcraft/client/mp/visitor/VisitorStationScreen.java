@@ -8,6 +8,7 @@ import dev.agentcraft.client.ui.Panels;
 import dev.agentcraft.client.ui.TextUtil;
 import dev.agentcraft.client.ui.UiStyle;
 import dev.agentcraft.mp.StudioId;
+import java.util.List;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.KeyEvent;
@@ -23,16 +24,24 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>It follows the studio view while open: a state update redraws, and the layout leaving range
  * closes the panel.
+ *
+ * <p>The panel never grows past the screen: a body with more rows than fit (a task wall can carry
+ * 34) is cut to the rows that fit, the last one saying how many are left out. The header and the
+ * footer are always drawn.
  */
 public final class VisitorStationScreen extends Screen {
 	private static final int W = 260;
 	private static final int ROW = 10;
+	/** The gap kept between the panel and the top and bottom of the screen. */
+	private static final int MARGIN = 4;
 
 	private final StudioId studioId;
 	private final Station kind;
 	private int x0;
 	private int y0;
 	private int h;
+	private List<String> lines = List.of();
+	private VisitorGate.Fit fit = new VisitorGate.Fit(0, 0, false);
 
 	public VisitorStationScreen(StudioId studioId, Station kind) {
 		super(Component.literal("Visitor"));
@@ -76,11 +85,17 @@ public final class VisitorStationScreen extends Screen {
 
 	private void layout() {
 		StudioView view = view();
-		int lines = Math.max(1, VisitorGate.stationLines(view == null ? null : view.publicState(), kind).size());
+		lines = VisitorGate.stationLines(view == null ? null : view.publicState(), kind);
 		Kit.Padding pp = Kit.padding("panel_paper");
-		h = pp.top() + 14 + 16 + (lines * ROW) + 12 + 12 + pp.bottom();
+		// everything but the body: padding, the two header rows and the footer
+		int chrome = pp.top() + 14 + 16 + 12 + 12 + pp.bottom();
+		int available = VisitorGate.rowsAvailable(this.height - 2 * MARGIN, chrome, ROW);
+		fit = VisitorGate.fit(lines.size(), available);
+		// an empty body keeps one blank row, as long as the screen has room for it
+		int rows = Math.max(Math.min(1, available), fit.rows());
+		h = chrome + (rows * ROW);
 		x0 = (this.width - W) / 2;
-		y0 = Math.max(4, (this.height - h) / 2);
+		y0 = Math.max(MARGIN, (this.height - h) / 2);
 	}
 
 	@Override
@@ -107,10 +122,13 @@ public final class VisitorStationScreen extends Screen {
 		Panels.text(g, font, kind.label(), ix, y, UiStyle.color("paper.path"));
 		y += 16;
 
-		// body: public state only
-		for (String line : VisitorGate.stationLines(view.publicState(), kind)) {
+		// body: public state only, cut to the rows that fit the screen
+		for (String line : lines.subList(0, fit.shown())) {
 			Panels.text(g, font, TextUtil.ellipsize(font, line, iw), ix, y, ink);
 			y += ROW;
+		}
+		if (fit.indicator()) {
+			Panels.text(g, font, VisitorGate.moreLine(fit.remaining()), ix, y, muted);
 		}
 
 		// footer: the panel is read-only and Esc closes it
